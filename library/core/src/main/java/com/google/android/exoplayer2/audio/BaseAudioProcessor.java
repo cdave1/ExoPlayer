@@ -92,12 +92,14 @@ public abstract class BaseAudioProcessor implements AudioProcessor {
   @Override
   public final void reset() {
     flush();
-    buffer = EMPTY_BUFFER;
-    pendingInputAudioFormat = AudioFormat.NOT_SET;
-    pendingOutputAudioFormat = AudioFormat.NOT_SET;
-    inputAudioFormat = AudioFormat.NOT_SET;
-    outputAudioFormat = AudioFormat.NOT_SET;
-    onReset();
+    if (allowsReset()) {
+      buffer = EMPTY_BUFFER;
+      pendingInputAudioFormat = AudioFormat.NOT_SET;
+      pendingOutputAudioFormat = AudioFormat.NOT_SET;
+      inputAudioFormat = AudioFormat.NOT_SET;
+      outputAudioFormat = AudioFormat.NOT_SET;
+      onReset();
+    }
   }
 
   /**
@@ -124,6 +126,10 @@ public abstract class BaseAudioProcessor implements AudioProcessor {
   protected AudioFormat onConfigure(AudioFormat inputAudioFormat)
       throws UnhandledAudioFormatException {
     return AudioFormat.NOT_SET;
+  }
+
+  protected boolean allowsReset() {
+    return true;
   }
 
   /** Called when the end-of-stream is queued to the processor. */

@@ -275,6 +275,10 @@ public final class Cue {
    */
   public final @VerticalType int verticalType;
 
+  // BIGSCREEN ADDITION
+  public long startTimeUs = -1;
+  public long endTimeUs = -1;
+
   /**
    * Creates a text cue whose {@link #textAlignment} is null, whose type parameters are set to
    * {@link #TYPE_UNSET} and whose dimension parameters are set to {@link #DIMEN_UNSET}.

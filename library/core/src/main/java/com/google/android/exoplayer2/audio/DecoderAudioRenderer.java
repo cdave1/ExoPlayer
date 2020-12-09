@@ -359,6 +359,7 @@ public abstract class DecoderAudioRenderer extends BaseRenderer implements Media
     }
 
     if (audioTrackNeedsConfigure) {
+      android.util.Log.i("Unity", "[DecoderAudioRenderer] audioTrackNeedsConfigure");
       Format outputFormat = getOutputFormat();
       audioSink.configure(outputFormat.pcmEncoding, outputFormat.channelCount,
           outputFormat.sampleRate, 0, null, encoderDelay, encoderPadding);

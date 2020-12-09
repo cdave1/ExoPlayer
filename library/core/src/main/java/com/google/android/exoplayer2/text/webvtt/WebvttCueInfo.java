@@ -29,5 +29,8 @@ public final class WebvttCueInfo {
     this.cue = cue;
     this.startTimeUs = startTimeUs;
     this.endTimeUs = endTimeUs;
+
+    this.cue.startTimeUs = startTimeUs;
+    this.cue.endTimeUs = endTimeUs;
   }
 }

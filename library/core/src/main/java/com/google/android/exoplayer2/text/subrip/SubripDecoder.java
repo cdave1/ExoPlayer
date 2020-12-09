@@ -100,9 +100,13 @@ public final class SubripDecoder extends SimpleSubtitleDecoder {
       }
 
       Matcher matcher = SUBRIP_TIMING_LINE.matcher(currentLine);
+      long endTimeUs = -1;
+      long startTimeUs = -1;
       if (matcher.matches()) {
-        cueTimesUs.add(parseTimecode(matcher, /* groupOffset= */ 1));
-        cueTimesUs.add(parseTimecode(matcher, /* groupOffset= */ 6));
+        startTimeUs = parseTimecode(matcher, /* groupOffset= */ 1);
+        endTimeUs = parseTimecode(matcher, /* groupOffset= */ 6);
+        cueTimesUs.add(startTimeUs);
+        cueTimesUs.add(endTimeUs);
       } else {
         Log.w(TAG, "Skipping invalid timing: " + currentLine);
         continue;
@@ -131,7 +135,10 @@ public final class SubripDecoder extends SimpleSubtitleDecoder {
           break;
         }
       }
-      cues.add(buildCue(text, alignmentTag));
+      Cue cue = buildCue(text, alignmentTag);
+      cue.startTimeUs = startTimeUs;
+      cue.endTimeUs = endTimeUs;
+      cues.add(cue);
       cues.add(Cue.EMPTY);
     }
 
