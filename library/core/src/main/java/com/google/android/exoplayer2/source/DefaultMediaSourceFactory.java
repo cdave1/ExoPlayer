@@ -15,32 +15,31 @@
  */
 package com.google.android.exoplayer2.source;
 
+import static com.google.android.exoplayer2.util.Util.castNonNull;
+
 import android.content.Context;
-import android.net.Uri;
 import android.util.SparseArray;
 import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
-import com.google.android.exoplayer2.ExoPlayerLibraryInfo;
-import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.MediaItem;
-import com.google.android.exoplayer2.drm.DefaultDrmSessionManager;
 import com.google.android.exoplayer2.drm.DrmSessionManager;
-import com.google.android.exoplayer2.drm.FrameworkMediaDrm;
-import com.google.android.exoplayer2.drm.HttpMediaDrmCallback;
-import com.google.android.exoplayer2.drm.MediaDrmCallback;
+import com.google.android.exoplayer2.extractor.DefaultExtractorsFactory;
+import com.google.android.exoplayer2.extractor.ExtractorsFactory;
 import com.google.android.exoplayer2.offline.StreamKey;
+import com.google.android.exoplayer2.source.ads.AdsLoader;
+import com.google.android.exoplayer2.source.ads.AdsLoader.AdViewProvider;
+import com.google.android.exoplayer2.source.ads.AdsMediaSource;
 import com.google.android.exoplayer2.upstream.DataSource;
+import com.google.android.exoplayer2.upstream.DataSpec;
 import com.google.android.exoplayer2.upstream.DefaultDataSourceFactory;
-import com.google.android.exoplayer2.upstream.DefaultHttpDataSourceFactory;
-import com.google.android.exoplayer2.upstream.DefaultLoadErrorHandlingPolicy;
 import com.google.android.exoplayer2.upstream.HttpDataSource;
 import com.google.android.exoplayer2.upstream.LoadErrorHandlingPolicy;
 import com.google.android.exoplayer2.util.Assertions;
+import com.google.android.exoplayer2.util.Log;
 import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.Util;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 
 /**
  * The default {@link MediaSourceFactory} implementation.
@@ -49,134 +48,235 @@ import java.util.Map;
  * factories:
  *
  * <ul>
- *   <li>{@code DashMediaSource.Factory} if the item's {@link MediaItem.PlaybackProperties#sourceUri
- *       sourceUri} ends in '.mpd' or if its {@link MediaItem.PlaybackProperties#mimeType mimeType
- *       field} is explicitly set to {@link MimeTypes#APPLICATION_MPD} (Requires the <a
+ *   <li>{@code DashMediaSource.Factory} if the item's {@link MediaItem.PlaybackProperties#uri uri}
+ *       ends in '.mpd' or if its {@link MediaItem.PlaybackProperties#mimeType mimeType field} is
+ *       explicitly set to {@link MimeTypes#APPLICATION_MPD} (Requires the <a
  *       href="https://exoplayer.dev/hello-world.html#add-exoplayer-modules">exoplayer-dash module
  *       to be added</a> to the app).
- *   <li>{@code HlsMediaSource.Factory} if the item's {@link MediaItem.PlaybackProperties#sourceUri
- *       sourceUri} ends in '.m3u8' or if its {@link MediaItem.PlaybackProperties#mimeType mimeType
- *       field} is explicitly set to {@link MimeTypes#APPLICATION_M3U8} (Requires the <a
+ *   <li>{@code HlsMediaSource.Factory} if the item's {@link MediaItem.PlaybackProperties#uri uri}
+ *       ends in '.m3u8' or if its {@link MediaItem.PlaybackProperties#mimeType mimeType field} is
+ *       explicitly set to {@link MimeTypes#APPLICATION_M3U8} (Requires the <a
  *       href="https://exoplayer.dev/hello-world.html#add-exoplayer-modules">exoplayer-hls module to
  *       be added</a> to the app).
- *   <li>{@code SsMediaSource.Factory} if the item's {@link MediaItem.PlaybackProperties#sourceUri
- *       sourceUri} ends in '.ism', '.ism/Manifest' or if its {@link
- *       MediaItem.PlaybackProperties#mimeType mimeType field} is explicitly set to {@link
- *       MimeTypes#APPLICATION_SS} (Requires the <a
+ *   <li>{@code SsMediaSource.Factory} if the item's {@link MediaItem.PlaybackProperties#uri uri}
+ *       ends in '.ism', '.ism/Manifest' or if its {@link MediaItem.PlaybackProperties#mimeType
+ *       mimeType field} is explicitly set to {@link MimeTypes#APPLICATION_SS} (Requires the <a
  *       href="https://exoplayer.dev/hello-world.html#add-exoplayer-modules">
  *       exoplayer-smoothstreaming module to be added</a> to the app).
  *   <li>{@link ProgressiveMediaSource.Factory} serves as a fallback if the item's {@link
- *       MediaItem.PlaybackProperties#sourceUri sourceUri} doesn't match one of the above. It tries
- *       to infer the required extractor by using the {@link
- *       com.google.android.exoplayer2.extractor.DefaultExtractorsFactory}. An {@link
- *       UnrecognizedInputFormatException} is thrown if none of the available extractors can read
- *       the stream.
+ *       MediaItem.PlaybackProperties#uri uri} doesn't match one of the above. It tries to infer the
+ *       required extractor by using the {@link
+ *       com.google.android.exoplayer2.extractor.DefaultExtractorsFactory} or the {@link
+ *       ExtractorsFactory} provided in the constructor. An {@link UnrecognizedInputFormatException}
+ *       is thrown if none of the available extractors can read the stream.
  * </ul>
  *
- * <h3>DrmSessionManager creation for protected content</h3>
+ * <h3>Ad support for media items with ad tag URIs</h3>
  *
- * <p>For a media item with a valid {@link
- * com.google.android.exoplayer2.MediaItem.DrmConfiguration}, a {@link DefaultDrmSessionManager} is
- * created. The following setter can be used to optionally configure the creation:
- *
- * <ul>
- *   <li>{@link #setDrmHttpDataSourceFactory(HttpDataSource.Factory)}: Sets the data source factory
- *       to be used by the {@link HttpMediaDrmCallback} for network requests (default: {@link
- *       DefaultHttpDataSourceFactory}).
- * </ul>
- *
- * <p>For media items without a drm configuration {@link DrmSessionManager#DUMMY} is used. To use an
- * alternative dummy, apps can pass a drm session manager to {@link
- * #setDrmSessionManager(DrmSessionManager)} which will be used for all items without a drm
- * configuration.
+ * <p>To support media items with {@link MediaItem.PlaybackProperties#adsConfiguration ads
+ * configuration}, {@link #setAdsLoaderProvider} and {@link #setAdViewProvider} need to be called to
+ * configure the factory with the required providers.
  */
 public final class DefaultMediaSourceFactory implements MediaSourceFactory {
 
   /**
-   * Creates a new instance with the given {@link Context}.
-   *
-   * <p>This is functionally equivalent with calling {@code #newInstance(Context,
-   * DefaultDataSourceFactory)}.
-   *
-   * @param context The {@link Context}.
+   * Provides {@link AdsLoader} instances for media items that have {@link
+   * MediaItem.PlaybackProperties#adsConfiguration ad tag URIs}.
    */
-  public static DefaultMediaSourceFactory newInstance(Context context) {
-    return newInstance(
-        context,
-        new DefaultDataSourceFactory(
-            context, Util.getUserAgent(context, ExoPlayerLibraryInfo.VERSION_SLASHY)));
+  public interface AdsLoaderProvider {
+
+    /**
+     * Returns an {@link AdsLoader} for the given {@link
+     * MediaItem.PlaybackProperties#adsConfiguration ads configuration}, or {@code null} if no ads
+     * loader is available for the given ads configuration.
+     *
+     * <p>This method is called each time a {@link MediaSource} is created from a {@link MediaItem}
+     * that defines an {@link MediaItem.PlaybackProperties#adsConfiguration ads configuration}.
+     */
+    @Nullable
+    AdsLoader getAdsLoader(MediaItem.AdsConfiguration adsConfiguration);
   }
 
-  /**
-   * Creates a new instance with the given {@link Context} and {@link DataSource.Factory}.
-   *
-   * @param context The {@link Context}.
-   * @param dataSourceFactory A {@link DataSource.Factory} to be used to create media sources.
-   */
-  public static DefaultMediaSourceFactory newInstance(
-      Context context, DataSource.Factory dataSourceFactory) {
-    return new DefaultMediaSourceFactory(context, dataSourceFactory);
-  }
+  private static final String TAG = "DefaultMediaSourceFactory";
 
+  private final MediaSourceDrmHelper mediaSourceDrmHelper;
   private final DataSource.Factory dataSourceFactory;
   private final SparseArray<MediaSourceFactory> mediaSourceFactories;
   @C.ContentType private final int[] supportedTypes;
-  private final String userAgent;
 
-  private DrmSessionManager drmSessionManager;
-  private HttpDataSource.Factory drmHttpDataSourceFactory;
+  @Nullable private AdsLoaderProvider adsLoaderProvider;
+  @Nullable private AdViewProvider adViewProvider;
+  @Nullable private DrmSessionManager drmSessionManager;
   @Nullable private List<StreamKey> streamKeys;
+  @Nullable private LoadErrorHandlingPolicy loadErrorHandlingPolicy;
+  private long liveTargetOffsetMs;
+  private long liveMinOffsetMs;
+  private long liveMaxOffsetMs;
+  private float liveMinSpeed;
+  private float liveMaxSpeed;
 
-  private DefaultMediaSourceFactory(Context context, DataSource.Factory dataSourceFactory) {
+  /**
+   * Creates a new instance.
+   *
+   * @param context Any context.
+   */
+  public DefaultMediaSourceFactory(Context context) {
+    this(new DefaultDataSourceFactory(context));
+  }
+
+  /**
+   * Creates a new instance.
+   *
+   * @param context Any context.
+   * @param extractorsFactory An {@link ExtractorsFactory} used to extract progressive media from
+   *     its container.
+   */
+  public DefaultMediaSourceFactory(Context context, ExtractorsFactory extractorsFactory) {
+    this(new DefaultDataSourceFactory(context), extractorsFactory);
+  }
+
+  /**
+   * Creates a new instance.
+   *
+   * @param dataSourceFactory A {@link DataSource.Factory} to create {@link DataSource} instances
+   *     for requesting media data.
+   */
+  public DefaultMediaSourceFactory(DataSource.Factory dataSourceFactory) {
+    this(dataSourceFactory, new DefaultExtractorsFactory());
+  }
+
+  /**
+   * Creates a new instance.
+   *
+   * @param dataSourceFactory A {@link DataSource.Factory} to create {@link DataSource} instances
+   *     for requesting media data.
+   * @param extractorsFactory An {@link ExtractorsFactory} used to extract progressive media from
+   *     its container.
+   */
+  public DefaultMediaSourceFactory(
+      DataSource.Factory dataSourceFactory, ExtractorsFactory extractorsFactory) {
     this.dataSourceFactory = dataSourceFactory;
-    drmSessionManager = DrmSessionManager.getDummyDrmSessionManager();
-    userAgent = Util.getUserAgent(context, ExoPlayerLibraryInfo.VERSION_SLASHY);
-    drmHttpDataSourceFactory = new DefaultHttpDataSourceFactory(userAgent);
-    mediaSourceFactories = loadDelegates(dataSourceFactory);
+    mediaSourceDrmHelper = new MediaSourceDrmHelper();
+    mediaSourceFactories = loadDelegates(dataSourceFactory, extractorsFactory);
     supportedTypes = new int[mediaSourceFactories.size()];
     for (int i = 0; i < mediaSourceFactories.size(); i++) {
       supportedTypes[i] = mediaSourceFactories.keyAt(i);
     }
+    liveTargetOffsetMs = C.TIME_UNSET;
+    liveMinOffsetMs = C.TIME_UNSET;
+    liveMaxOffsetMs = C.TIME_UNSET;
+    liveMinSpeed = C.RATE_UNSET;
+    liveMaxSpeed = C.RATE_UNSET;
   }
 
   /**
-   * Sets the {@link HttpDataSource.Factory} to be used for creating {@link HttpMediaDrmCallback
-   * HttpMediaDrmCallbacks} which executes key and provisioning requests over HTTP. If {@code null}
-   * is passed the {@link DefaultHttpDataSourceFactory} is used.
+   * Sets the {@link AdsLoaderProvider} that provides {@link AdsLoader} instances for media items
+   * that have {@link MediaItem.PlaybackProperties#adsConfiguration ads configurations}.
    *
-   * @param drmHttpDataSourceFactory The HTTP data source factory or {@code null} to use {@link
-   *     DefaultHttpDataSourceFactory}.
+   * @param adsLoaderProvider A provider for {@link AdsLoader} instances.
    * @return This factory, for convenience.
    */
+  public DefaultMediaSourceFactory setAdsLoaderProvider(
+      @Nullable AdsLoaderProvider adsLoaderProvider) {
+    this.adsLoaderProvider = adsLoaderProvider;
+    return this;
+  }
+
+  /**
+   * Sets the {@link AdViewProvider} that provides information about views for the ad playback UI.
+   *
+   * @param adViewProvider A provider for {@link AdsLoader} instances.
+   * @return This factory, for convenience.
+   */
+  public DefaultMediaSourceFactory setAdViewProvider(@Nullable AdViewProvider adViewProvider) {
+    this.adViewProvider = adViewProvider;
+    return this;
+  }
+
+  /**
+   * Sets the target live offset for live streams, in milliseconds.
+   *
+   * @param liveTargetOffsetMs The target live offset, in milliseconds, or {@link C#TIME_UNSET} to
+   *     use the media-defined default.
+   * @return This factory, for convenience.
+   */
+  public DefaultMediaSourceFactory setLiveTargetOffsetMs(long liveTargetOffsetMs) {
+    this.liveTargetOffsetMs = liveTargetOffsetMs;
+    return this;
+  }
+
+  /**
+   * Sets the minimum offset from the live edge for live streams, in milliseconds.
+   *
+   * @param liveMinOffsetMs The minimum allowed live offset, in milliseconds, or {@link
+   *     C#TIME_UNSET} to use the media-defined default.
+   * @return This factory, for convenience.
+   */
+  public DefaultMediaSourceFactory setLiveMinOffsetMs(long liveMinOffsetMs) {
+    this.liveMinOffsetMs = liveMinOffsetMs;
+    return this;
+  }
+
+  /**
+   * Sets the maximum offset from the live edge for live streams, in milliseconds.
+   *
+   * @param liveMaxOffsetMs The maximum allowed live offset, in milliseconds, or {@link
+   *     C#TIME_UNSET} to use the media-defined default.
+   * @return This factory, for convenience.
+   */
+  public DefaultMediaSourceFactory setLiveMaxOffsetMs(long liveMaxOffsetMs) {
+    this.liveMaxOffsetMs = liveMaxOffsetMs;
+    return this;
+  }
+
+  /**
+   * Sets the minimum playback speed for live streams.
+   *
+   * @param minSpeed The minimum playback speed for live streams, or {@link C#RATE_UNSET} to use the
+   *     media-defined default.
+   * @return This factory, for convenience.
+   */
+  public DefaultMediaSourceFactory setLiveMinSpeed(float minSpeed) {
+    this.liveMinSpeed = minSpeed;
+    return this;
+  }
+
+  /**
+   * Sets the maximum playback speed for live streams.
+   *
+   * @param maxSpeed The maximum playback speed for live streams, or {@link C#RATE_UNSET} to use the
+   *     media-defined default.
+   * @return This factory, for convenience.
+   */
+  public DefaultMediaSourceFactory setLiveMaxSpeed(float maxSpeed) {
+    this.liveMaxSpeed = maxSpeed;
+    return this;
+  }
+
+  @Override
   public DefaultMediaSourceFactory setDrmHttpDataSourceFactory(
       @Nullable HttpDataSource.Factory drmHttpDataSourceFactory) {
-    this.drmHttpDataSourceFactory =
-        drmHttpDataSourceFactory != null
-            ? drmHttpDataSourceFactory
-            : new DefaultHttpDataSourceFactory(userAgent);
+    mediaSourceDrmHelper.setDrmHttpDataSourceFactory(drmHttpDataSourceFactory);
+    return this;
+  }
+
+  @Override
+  public DefaultMediaSourceFactory setDrmUserAgent(@Nullable String userAgent) {
+    mediaSourceDrmHelper.setDrmUserAgent(userAgent);
     return this;
   }
 
   @Override
   public DefaultMediaSourceFactory setDrmSessionManager(
       @Nullable DrmSessionManager drmSessionManager) {
-    this.drmSessionManager =
-        drmSessionManager != null
-            ? drmSessionManager
-            : DrmSessionManager.getDummyDrmSessionManager();
+    this.drmSessionManager = drmSessionManager;
     return this;
   }
 
   @Override
   public DefaultMediaSourceFactory setLoadErrorHandlingPolicy(
       @Nullable LoadErrorHandlingPolicy loadErrorHandlingPolicy) {
-    LoadErrorHandlingPolicy newLoadErrorHandlingPolicy =
-        loadErrorHandlingPolicy != null
-            ? loadErrorHandlingPolicy
-            : new DefaultLoadErrorHandlingPolicy();
-    for (int i = 0; i < mediaSourceFactories.size(); i++) {
-      mediaSourceFactories.valueAt(i).setLoadErrorHandlingPolicy(newLoadErrorHandlingPolicy);
-    }
+    this.loadErrorHandlingPolicy = loadErrorHandlingPolicy;
     return this;
   }
 
@@ -203,72 +303,74 @@ public final class DefaultMediaSourceFactory implements MediaSourceFactory {
     Assertions.checkNotNull(mediaItem.playbackProperties);
     @C.ContentType
     int type =
-        inferContentType(
-            mediaItem.playbackProperties.sourceUri, mediaItem.playbackProperties.mimeType);
+        Util.inferContentTypeForUriAndMimeType(
+            mediaItem.playbackProperties.uri, mediaItem.playbackProperties.mimeType);
     @Nullable MediaSourceFactory mediaSourceFactory = mediaSourceFactories.get(type);
     Assertions.checkNotNull(
         mediaSourceFactory, "No suitable media source factory found for content type: " + type);
-    mediaSourceFactory.setDrmSessionManager(createDrmSessionManager(mediaItem));
+    mediaSourceFactory.setDrmSessionManager(
+        drmSessionManager != null ? drmSessionManager : mediaSourceDrmHelper.create(mediaItem));
     mediaSourceFactory.setStreamKeys(
         !mediaItem.playbackProperties.streamKeys.isEmpty()
             ? mediaItem.playbackProperties.streamKeys
             : streamKeys);
+    mediaSourceFactory.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy);
 
-    MediaSource leafMediaSource = mediaSourceFactory.createMediaSource(mediaItem);
-
-    List<MediaItem.Subtitle> subtitles = mediaItem.playbackProperties.subtitles;
-    if (subtitles.isEmpty()) {
-      return maybeClipMediaSource(mediaItem, leafMediaSource);
-    }
-
-    MediaSource[] mediaSources = new MediaSource[subtitles.size() + 1];
-    mediaSources[0] = leafMediaSource;
-    SingleSampleMediaSource.Factory singleSampleSourceFactory =
-        new SingleSampleMediaSource.Factory(dataSourceFactory);
-    for (int i = 0; i < subtitles.size(); i++) {
-      MediaItem.Subtitle subtitle = subtitles.get(i);
-      Format subtitleFormat =
-          new Format.Builder()
-              .setSampleMimeType(subtitle.mimeType)
-              .setLanguage(subtitle.language)
-              .setSelectionFlags(subtitle.selectionFlags)
+    // Make sure to retain the very same media item instance, if no value needs to be overridden.
+    if ((mediaItem.liveConfiguration.targetOffsetMs == C.TIME_UNSET
+            && liveTargetOffsetMs != C.TIME_UNSET)
+        || (mediaItem.liveConfiguration.minPlaybackSpeed == C.RATE_UNSET
+            && liveMinSpeed != C.RATE_UNSET)
+        || (mediaItem.liveConfiguration.maxPlaybackSpeed == C.RATE_UNSET
+            && liveMaxSpeed != C.RATE_UNSET)
+        || (mediaItem.liveConfiguration.minOffsetMs == C.TIME_UNSET
+            && liveMinOffsetMs != C.TIME_UNSET)
+        || (mediaItem.liveConfiguration.maxOffsetMs == C.TIME_UNSET
+            && liveMaxOffsetMs != C.TIME_UNSET)) {
+      mediaItem =
+          mediaItem
+              .buildUpon()
+              .setLiveTargetOffsetMs(
+                  mediaItem.liveConfiguration.targetOffsetMs == C.TIME_UNSET
+                      ? liveTargetOffsetMs
+                      : mediaItem.liveConfiguration.targetOffsetMs)
+              .setLiveMinPlaybackSpeed(
+                  mediaItem.liveConfiguration.minPlaybackSpeed == C.RATE_UNSET
+                      ? liveMinSpeed
+                      : mediaItem.liveConfiguration.minPlaybackSpeed)
+              .setLiveMaxPlaybackSpeed(
+                  mediaItem.liveConfiguration.maxPlaybackSpeed == C.RATE_UNSET
+                      ? liveMaxSpeed
+                      : mediaItem.liveConfiguration.maxPlaybackSpeed)
+              .setLiveMinOffsetMs(
+                  mediaItem.liveConfiguration.minOffsetMs == C.TIME_UNSET
+                      ? liveMinOffsetMs
+                      : mediaItem.liveConfiguration.minOffsetMs)
+              .setLiveMaxOffsetMs(
+                  mediaItem.liveConfiguration.maxOffsetMs == C.TIME_UNSET
+                      ? liveMaxOffsetMs
+                      : mediaItem.liveConfiguration.maxOffsetMs)
               .build();
-      mediaSources[i + 1] =
-          singleSampleSourceFactory.createMediaSource(
-              subtitle.uri, subtitleFormat, /* durationUs= */ C.TIME_UNSET);
     }
-    return maybeClipMediaSource(mediaItem, new MergingMediaSource(mediaSources));
+    MediaSource mediaSource = mediaSourceFactory.createMediaSource(mediaItem);
+
+    List<MediaItem.Subtitle> subtitles = castNonNull(mediaItem.playbackProperties).subtitles;
+    if (!subtitles.isEmpty()) {
+      MediaSource[] mediaSources = new MediaSource[subtitles.size() + 1];
+      mediaSources[0] = mediaSource;
+      SingleSampleMediaSource.Factory singleSampleSourceFactory =
+          new SingleSampleMediaSource.Factory(dataSourceFactory);
+      for (int i = 0; i < subtitles.size(); i++) {
+        mediaSources[i + 1] =
+            singleSampleSourceFactory.createMediaSource(
+                subtitles.get(i), /* durationUs= */ C.TIME_UNSET);
+      }
+      mediaSource = new MergingMediaSource(mediaSources);
+    }
+    return maybeWrapWithAdsMediaSource(mediaItem, maybeClipMediaSource(mediaItem, mediaSource));
   }
 
   // internal methods
-
-  private DrmSessionManager createDrmSessionManager(MediaItem mediaItem) {
-    Assertions.checkNotNull(mediaItem.playbackProperties);
-    if (mediaItem.playbackProperties.drmConfiguration == null
-        || mediaItem.playbackProperties.drmConfiguration.licenseUri == null
-        || Util.SDK_INT < 18) {
-      return drmSessionManager;
-    }
-    return new DefaultDrmSessionManager.Builder()
-        .setUuidAndExoMediaDrmProvider(
-            mediaItem.playbackProperties.drmConfiguration.uuid, FrameworkMediaDrm.DEFAULT_PROVIDER)
-        .setMultiSession(mediaItem.playbackProperties.drmConfiguration.multiSession)
-        .setPlayClearSamplesWithoutKeys(
-            mediaItem.playbackProperties.drmConfiguration.playClearContentWithoutKey)
-        .setUseDrmSessionsForClearContent(
-            Util.toArray(mediaItem.playbackProperties.drmConfiguration.sessionForClearTypes))
-        .build(createHttpMediaDrmCallback(mediaItem.playbackProperties.drmConfiguration));
-  }
-
-  private MediaDrmCallback createHttpMediaDrmCallback(MediaItem.DrmConfiguration drmConfiguration) {
-    Assertions.checkNotNull(drmConfiguration.licenseUri);
-    HttpMediaDrmCallback drmCallback =
-        new HttpMediaDrmCallback(drmConfiguration.licenseUri.toString(), drmHttpDataSourceFactory);
-    for (Map.Entry<String, String> entry : drmConfiguration.requestHeaders.entrySet()) {
-      drmCallback.setKeyRequestProperty(entry.getKey(), entry.getValue());
-    }
-    return drmCallback;
-  }
 
   private static MediaSource maybeClipMediaSource(MediaItem mediaItem, MediaSource mediaSource) {
     if (mediaItem.clippingProperties.startPositionMs == 0
@@ -285,8 +387,38 @@ public final class DefaultMediaSourceFactory implements MediaSourceFactory {
         mediaItem.clippingProperties.relativeToDefaultPosition);
   }
 
+  private MediaSource maybeWrapWithAdsMediaSource(MediaItem mediaItem, MediaSource mediaSource) {
+    Assertions.checkNotNull(mediaItem.playbackProperties);
+    @Nullable
+    MediaItem.AdsConfiguration adsConfiguration = mediaItem.playbackProperties.adsConfiguration;
+    if (adsConfiguration == null) {
+      return mediaSource;
+    }
+    AdsLoaderProvider adsLoaderProvider = this.adsLoaderProvider;
+    AdViewProvider adViewProvider = this.adViewProvider;
+    if (adsLoaderProvider == null || adViewProvider == null) {
+      Log.w(
+          TAG,
+          "Playing media without ads. Configure ad support by calling setAdsLoaderProvider and"
+              + " setAdViewProvider.");
+      return mediaSource;
+    }
+    @Nullable AdsLoader adsLoader = adsLoaderProvider.getAdsLoader(adsConfiguration);
+    if (adsLoader == null) {
+      Log.w(TAG, "Playing media without ads, as no AdsLoader was provided.");
+      return mediaSource;
+    }
+    return new AdsMediaSource(
+        mediaSource,
+        new DataSpec(adsConfiguration.adTagUri),
+        adsConfiguration.adsId,
+        /* adMediaSourceFactory= */ this,
+        adsLoader,
+        adViewProvider);
+  }
+
   private static SparseArray<MediaSourceFactory> loadDelegates(
-      DataSource.Factory dataSourceFactory) {
+      DataSource.Factory dataSourceFactory, ExtractorsFactory extractorsFactory) {
     SparseArray<MediaSourceFactory> factories = new SparseArray<>();
     // LINT.IfChange
     try {
@@ -321,23 +453,8 @@ public final class DefaultMediaSourceFactory implements MediaSourceFactory {
       // Expected if the app was built without the hls module.
     }
     // LINT.ThenChange(../../../../../../../../proguard-rules.txt)
-    factories.put(C.TYPE_OTHER, new ProgressiveMediaSource.Factory(dataSourceFactory));
+    factories.put(
+        C.TYPE_OTHER, new ProgressiveMediaSource.Factory(dataSourceFactory, extractorsFactory));
     return factories;
-  }
-
-  private static int inferContentType(Uri sourceUri, @Nullable String mimeType) {
-    if (mimeType == null) {
-      return Util.inferContentType(sourceUri);
-    }
-    switch (mimeType) {
-      case MimeTypes.APPLICATION_MPD:
-        return C.TYPE_DASH;
-      case MimeTypes.APPLICATION_M3U8:
-        return C.TYPE_HLS;
-      case MimeTypes.APPLICATION_SS:
-        return C.TYPE_SS;
-      default:
-        return Util.inferContentType(sourceUri);
-    }
   }
 }

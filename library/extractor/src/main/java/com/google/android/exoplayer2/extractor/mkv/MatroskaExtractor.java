@@ -15,6 +15,13 @@
  */
 package com.google.android.exoplayer2.extractor.mkv;
 
+import static com.google.android.exoplayer2.util.Assertions.checkArgument;
+import static com.google.android.exoplayer2.util.Assertions.checkNotNull;
+import static com.google.android.exoplayer2.util.Assertions.checkState;
+import static com.google.android.exoplayer2.util.Assertions.checkStateNotNull;
+import static java.lang.Math.max;
+import static java.lang.Math.min;
+
 import android.util.Pair;
 import android.util.SparseArray;
 import androidx.annotation.CallSuper;
@@ -23,6 +30,7 @@ import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.ParserException;
+import com.google.android.exoplayer2.audio.AacUtil;
 import com.google.android.exoplayer2.audio.Ac3Util;
 import com.google.android.exoplayer2.audio.MpegAudioUtil;
 import com.google.android.exoplayer2.drm.DrmInitData;
@@ -35,7 +43,6 @@ import com.google.android.exoplayer2.extractor.ExtractorsFactory;
 import com.google.android.exoplayer2.extractor.PositionHolder;
 import com.google.android.exoplayer2.extractor.SeekMap;
 import com.google.android.exoplayer2.extractor.TrackOutput;
-import com.google.android.exoplayer2.util.Assertions;
 import com.google.android.exoplayer2.util.Log;
 import com.google.android.exoplayer2.util.LongArray;
 import com.google.android.exoplayer2.util.MimeTypes;
@@ -44,7 +51,9 @@ import com.google.android.exoplayer2.util.ParsableByteArray;
 import com.google.android.exoplayer2.util.Util;
 import com.google.android.exoplayer2.video.AvcConfig;
 import com.google.android.exoplayer2.video.ColorInfo;
+import com.google.android.exoplayer2.video.DolbyVisionConfig;
 import com.google.android.exoplayer2.video.HevcConfig;
+import com.google.common.collect.ImmutableList;
 import java.io.IOException;
 import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
@@ -54,11 +63,15 @@ import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import org.checkerframework.checker.nullness.compatqual.NullableType;
+import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
+import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 
 /** Extracts data from the Matroska and WebM container formats. */
 public class MatroskaExtractor implements Extractor {
@@ -121,6 +134,8 @@ public class MatroskaExtractor implements Extractor {
   private static final String CODEC_ID_FLAC = "A_FLAC";
   private static final String CODEC_ID_ACM = "A_MS/ACM";
   private static final String CODEC_ID_PCM_INT_LIT = "A_PCM/INT/LIT";
+  private static final String CODEC_ID_PCM_INT_BIG = "A_PCM/INT/BIG";
+  private static final String CODEC_ID_PCM_FLOAT = "A_PCM/FLOAT/IEEE";
   private static final String CODEC_ID_SUBRIP = "S_TEXT/UTF8";
   private static final String CODEC_ID_ASS = "S_TEXT/ASS";
   private static final String CODEC_ID_VOBSUB = "S_VOBSUB";
@@ -164,6 +179,9 @@ public class MatroskaExtractor implements Extractor {
   private static final int ID_FLAG_FORCED = 0x55AA;
   private static final int ID_DEFAULT_DURATION = 0x23E383;
   private static final int ID_MAX_BLOCK_ADDITION_ID = 0x55EE;
+  private static final int ID_BLOCK_ADDITION_MAPPING = 0x41E4;
+  private static final int ID_BLOCK_ADD_ID_TYPE = 0x41E7;
+  private static final int ID_BLOCK_ADD_ID_EXTRA_DATA = 0x41ED;
   private static final int ID_NAME = 0x536E;
   private static final int ID_CODEC_ID = 0x86;
   private static final int ID_CODEC_PRIVATE = 0x63A2;
@@ -228,6 +246,17 @@ public class MatroskaExtractor implements Extractor {
    */
   private static final int BLOCK_ADDITIONAL_ID_VP9_ITU_T_35 = 4;
 
+  /**
+   * BlockAddIdType value for Dolby Vision configuration with profile <= 7. See also
+   * https://www.matroska.org/technical/codec_specs.html.
+   */
+  private static final int BLOCK_ADD_ID_TYPE_DVCC = 0x64766343;
+  /**
+   * BlockAddIdType value for Dolby Vision configuration with profile > 7. See also
+   * https://www.matroska.org/technical/codec_specs.html.
+   */
+  private static final int BLOCK_ADD_ID_TYPE_DVVC = 0x64767643;
+
   private static final int LACING_NONE = 0;
   private static final int LACING_XIPH = 1;
   private static final int LACING_FIXED_SIZE = 2;
@@ -243,8 +272,8 @@ public class MatroskaExtractor implements Extractor {
    * <p>The display time of each subtitle is passed as {@code timeUs} to {@link
    * TrackOutput#sampleMetadata}. The start and end timecodes in this template are relative to
    * {@code timeUs}. Hence the start timecode is always zero. The 12 byte end timecode starting at
-   * {@link #SUBRIP_PREFIX_END_TIMECODE_OFFSET} is set to a dummy value, and must be replaced with
-   * the duration of the subtitle.
+   * {@link #SUBRIP_PREFIX_END_TIMECODE_OFFSET} is set to a placeholder value, and must be replaced
+   * with the duration of the subtitle.
    *
    * <p>Equivalent to the UTF-8 string: "1\n00:00:00,000 --> 00:00:00,000\n".
    */
@@ -278,8 +307,8 @@ public class MatroskaExtractor implements Extractor {
    * <p>The display time of each subtitle is passed as {@code timeUs} to {@link
    * TrackOutput#sampleMetadata}. The start and end timecodes in this template are relative to
    * {@code timeUs}. Hence the start timecode is always zero. The 12 byte end timecode starting at
-   * {@link #SUBRIP_PREFIX_END_TIMECODE_OFFSET} is set to a dummy value, and must be replaced with
-   * the duration of the subtitle.
+   * {@link #SUBRIP_PREFIX_END_TIMECODE_OFFSET} is set to a placeholder value, and must be replaced
+   * with the duration of the subtitle.
    *
    * <p>Equivalent to the UTF-8 string: "Dialogue: 0:00:00:00,0:00:00:00,".
    */
@@ -296,7 +325,7 @@ public class MatroskaExtractor implements Extractor {
    * The value by which to divide a time in microseconds to convert it to the unit of the last value
    * in an SSA timecode (1/100ths of a second).
    */
-  private static final long SSA_TIMECODE_LAST_VALUE_SCALING_FACTOR = 10000;
+  private static final long SSA_TIMECODE_LAST_VALUE_SCALING_FACTOR = 10_000;
   /**
    * The format of an SSA timecode.
    */
@@ -319,6 +348,18 @@ public class MatroskaExtractor implements Extractor {
    */
   private static final UUID WAVE_SUBFORMAT_PCM = new UUID(0x0100000000001000L, 0x800000AA00389B71L);
 
+  /** Some HTC devices signal rotation in track names. */
+  private static final Map<String, Integer> TRACK_NAME_TO_ROTATION_DEGREES;
+
+  static {
+    Map<String, Integer> trackNameToRotationDegrees = new HashMap<>();
+    trackNameToRotationDegrees.put("htc_video_rotA-000", 0);
+    trackNameToRotationDegrees.put("htc_video_rotA-090", 90);
+    trackNameToRotationDegrees.put("htc_video_rotA-180", 180);
+    trackNameToRotationDegrees.put("htc_video_rotA-270", 270);
+    TRACK_NAME_TO_ROTATION_DEGREES = Collections.unmodifiableMap(trackNameToRotationDegrees);
+  }
+
   private final EbmlReader reader;
   private final VarintReader varintReader;
   private final SparseArray<Track> tracks;
@@ -335,7 +376,7 @@ public class MatroskaExtractor implements Extractor {
   private final ParsableByteArray encryptionInitializationVector;
   private final ParsableByteArray encryptionSubsampleData;
   private final ParsableByteArray blockAdditionalData;
-  private ByteBuffer encryptionSubsampleDataBuffer;
+  private @MonotonicNonNull ByteBuffer encryptionSubsampleDataBuffer;
 
   private long segmentContentSize;
   private long segmentContentPosition = C.POSITION_UNSET;
@@ -459,7 +500,9 @@ public class MatroskaExtractor implements Extractor {
     }
     if (!continueReading) {
       for (int i = 0; i < tracks.size(); i++) {
-        tracks.valueAt(i).outputPendingSampleMetadata();
+        Track track = tracks.valueAt(i);
+        track.assertOutputInitialized();
+        track.outputPendingSampleMetadata();
       }
       return Extractor.RESULT_END_OF_INPUT;
     }
@@ -483,6 +526,7 @@ public class MatroskaExtractor implements Extractor {
       case ID_CLUSTER:
       case ID_TRACKS:
       case ID_TRACK_ENTRY:
+      case ID_BLOCK_ADDITION_MAPPING:
       case ID_AUDIO:
       case ID_VIDEO:
       case ID_CONTENT_ENCODINGS:
@@ -517,6 +561,7 @@ public class MatroskaExtractor implements Extractor {
       case ID_FLAG_FORCED:
       case ID_DEFAULT_DURATION:
       case ID_MAX_BLOCK_ADDITION_ID:
+      case ID_BLOCK_ADD_ID_TYPE:
       case ID_CODEC_DELAY:
       case ID_SEEK_PRE_ROLL:
       case ID_CHANNELS:
@@ -544,6 +589,7 @@ public class MatroskaExtractor implements Extractor {
       case ID_LANGUAGE:
         return EbmlProcessor.ELEMENT_TYPE_STRING;
       case ID_SEEK_ID:
+      case ID_BLOCK_ADD_ID_EXTRA_DATA:
       case ID_CONTENT_COMPRESSION_SETTINGS:
       case ID_CONTENT_ENCRYPTION_KEY_ID:
       case ID_SIMPLE_BLOCK:
@@ -591,6 +637,7 @@ public class MatroskaExtractor implements Extractor {
   @CallSuper
   protected void startMasterElement(int id, long contentPosition, long contentSize)
       throws ParserException {
+    assertInitialized();
     switch (id) {
       case ID_SEGMENT:
         if (segmentContentPosition != C.POSITION_UNSET
@@ -632,13 +679,13 @@ public class MatroskaExtractor implements Extractor {
         // TODO: check and fail if more than one content encoding is present.
         break;
       case ID_CONTENT_ENCRYPTION:
-        currentTrack.hasContentEncryption = true;
+        getCurrentTrack(id).hasContentEncryption = true;
         break;
       case ID_TRACK_ENTRY:
         currentTrack = new Track();
         break;
       case ID_MASTERING_METADATA:
-        currentTrack.hasColorInfo = true;
+        getCurrentTrack(id).hasColorInfo = true;
         break;
       default:
         break;
@@ -652,6 +699,7 @@ public class MatroskaExtractor implements Extractor {
    */
   @CallSuper
   protected void endMasterElement(int id) throws ParserException {
+    assertInitialized();
     switch (id) {
       case ID_SEGMENT_INFO:
         if (timecodeScale == C.TIME_UNSET) {
@@ -672,11 +720,13 @@ public class MatroskaExtractor implements Extractor {
         break;
       case ID_CUES:
         if (!sentSeekMap) {
-          extractorOutput.seekMap(buildSeekMap());
+          extractorOutput.seekMap(buildSeekMap(cueTimesUs, cueClusterPositions));
           sentSeekMap = true;
         } else {
           // We have already built the cues. Ignore.
         }
+        this.cueTimesUs = null;
+        this.cueClusterPositions = null;
         break;
       case ID_BLOCK_GROUP:
         if (blockState != BLOCK_STATE_DATA) {
@@ -689,6 +739,7 @@ public class MatroskaExtractor implements Extractor {
           sampleOffset += blockSampleSizes[i];
         }
         Track track = tracks.get(blockTrackNumber);
+        track.assertOutputInitialized();
         for (int i = 0; i < blockSampleCount; i++) {
           long sampleTimeUs = blockTimeUs + (i * track.defaultSampleDurationNs) / 1000;
           int sampleFlags = blockFlags;
@@ -704,6 +755,7 @@ public class MatroskaExtractor implements Extractor {
         blockState = BLOCK_STATE_START;
         break;
       case ID_CONTENT_ENCODING:
+        assertInTrackEntry(id);
         if (currentTrack.hasContentEncryption) {
           if (currentTrack.cryptoData == null) {
             throw new ParserException("Encrypted Track found but ContentEncKeyID was not found");
@@ -713,16 +765,22 @@ public class MatroskaExtractor implements Extractor {
         }
         break;
       case ID_CONTENT_ENCODINGS:
+        assertInTrackEntry(id);
         if (currentTrack.hasContentEncryption && currentTrack.sampleStrippedBytes != null) {
           throw new ParserException("Combining encryption and compression is not supported");
         }
         break;
       case ID_TRACK_ENTRY:
-        if (isCodecSupported(currentTrack.codecId)) {
-          currentTrack.initializeOutput(extractorOutput, currentTrack.number);
-          tracks.put(currentTrack.number, currentTrack);
+        Track currentTrack = checkStateNotNull(this.currentTrack);
+        if (currentTrack.codecId == null) {
+          throw new ParserException("CodecId is missing in TrackEntry element");
+        } else {
+          if (isCodecSupported(currentTrack.codecId)) {
+            currentTrack.initializeOutput(extractorOutput, currentTrack.number);
+            tracks.put(currentTrack.number, currentTrack);
+          }
         }
-        currentTrack = null;
+        this.currentTrack = null;
         break;
       case ID_TRACKS:
         if (tracks.size() == 0) {
@@ -764,49 +822,52 @@ public class MatroskaExtractor implements Extractor {
         timecodeScale = value;
         break;
       case ID_PIXEL_WIDTH:
-        currentTrack.width = (int) value;
+        getCurrentTrack(id).width = (int) value;
         break;
       case ID_PIXEL_HEIGHT:
-        currentTrack.height = (int) value;
+        getCurrentTrack(id).height = (int) value;
         break;
       case ID_DISPLAY_WIDTH:
-        currentTrack.displayWidth = (int) value;
+        getCurrentTrack(id).displayWidth = (int) value;
         break;
       case ID_DISPLAY_HEIGHT:
-        currentTrack.displayHeight = (int) value;
+        getCurrentTrack(id).displayHeight = (int) value;
         break;
       case ID_DISPLAY_UNIT:
-        currentTrack.displayUnit = (int) value;
+        getCurrentTrack(id).displayUnit = (int) value;
         break;
       case ID_TRACK_NUMBER:
-        currentTrack.number = (int) value;
+        getCurrentTrack(id).number = (int) value;
         break;
       case ID_FLAG_DEFAULT:
-        currentTrack.flagDefault = value == 1;
+        getCurrentTrack(id).flagDefault = value == 1;
         break;
       case ID_FLAG_FORCED:
-        currentTrack.flagForced = value == 1;
+        getCurrentTrack(id).flagForced = value == 1;
         break;
       case ID_TRACK_TYPE:
-        currentTrack.type = (int) value;
+        getCurrentTrack(id).type = (int) value;
         break;
       case ID_DEFAULT_DURATION:
-        currentTrack.defaultSampleDurationNs = (int) value;
+        getCurrentTrack(id).defaultSampleDurationNs = (int) value;
         break;
       case ID_MAX_BLOCK_ADDITION_ID:
-        currentTrack.maxBlockAdditionId = (int) value;
+        getCurrentTrack(id).maxBlockAdditionId = (int) value;
+        break;
+      case ID_BLOCK_ADD_ID_TYPE:
+        getCurrentTrack(id).blockAddIdType = (int) value;
         break;
       case ID_CODEC_DELAY:
-        currentTrack.codecDelayNs = value;
+        getCurrentTrack(id).codecDelayNs = value;
         break;
       case ID_SEEK_PRE_ROLL:
-        currentTrack.seekPreRollNs = value;
+        getCurrentTrack(id).seekPreRollNs = value;
         break;
       case ID_CHANNELS:
-        currentTrack.channelCount = (int) value;
+        getCurrentTrack(id).channelCount = (int) value;
         break;
       case ID_AUDIO_BIT_DEPTH:
-        currentTrack.audioBitDepth = (int) value;
+        getCurrentTrack(id).audioBitDepth = (int) value;
         break;
       case ID_REFERENCE_BLOCK:
         blockHasReferenceBlock = true;
@@ -842,10 +903,12 @@ public class MatroskaExtractor implements Extractor {
         }
         break;
       case ID_CUE_TIME:
+        assertInCues(id);
         cueTimesUs.add(scaleTimecodeToUs(value));
         break;
       case ID_CUE_CLUSTER_POSITION:
         if (!seenClusterPositionForCurrentCuePoint) {
+          assertInCues(id);
           // If there's more than one video/audio track, then there could be more than one
           // CueTrackPositions within a single CuePoint. In such a case, ignore all but the first
           // one (since the cluster position will be quite close for all the tracks).
@@ -861,6 +924,7 @@ public class MatroskaExtractor implements Extractor {
         break;
       case ID_STEREO_MODE:
         int layout = (int) value;
+        assertInTrackEntry(id);
         switch (layout) {
           case 0:
             currentTrack.stereoMode = C.STEREO_MODE_MONO;
@@ -879,6 +943,7 @@ public class MatroskaExtractor implements Extractor {
         }
         break;
       case ID_COLOUR_PRIMARIES:
+        assertInTrackEntry(id);
         currentTrack.hasColorInfo = true;
         switch ((int) value) {
           case 1:
@@ -898,6 +963,7 @@ public class MatroskaExtractor implements Extractor {
         }
         break;
       case ID_COLOUR_TRANSFER:
+        assertInTrackEntry(id);
         switch ((int) value) {
           case 1:  // BT.709.
           case 6:  // SMPTE 170M.
@@ -915,6 +981,7 @@ public class MatroskaExtractor implements Extractor {
         }
         break;
       case ID_COLOUR_RANGE:
+        assertInTrackEntry(id);
         switch((int) value) {
           case 1:  // Broadcast range.
             currentTrack.colorRange = C.COLOR_RANGE_LIMITED;
@@ -927,12 +994,13 @@ public class MatroskaExtractor implements Extractor {
         }
         break;
       case ID_MAX_CLL:
-        currentTrack.maxContentLuminance = (int) value;
+        getCurrentTrack(id).maxContentLuminance = (int) value;
         break;
       case ID_MAX_FALL:
-        currentTrack.maxFrameAverageLuminance = (int) value;
+        getCurrentTrack(id).maxFrameAverageLuminance = (int) value;
         break;
       case ID_PROJECTION_TYPE:
+        assertInTrackEntry(id);
         switch ((int) value) {
           case 0:
             currentTrack.projectionType = C.PROJECTION_RECTANGULAR;
@@ -970,46 +1038,46 @@ public class MatroskaExtractor implements Extractor {
         durationTimecode = (long) value;
         break;
       case ID_SAMPLING_FREQUENCY:
-        currentTrack.sampleRate = (int) value;
+        getCurrentTrack(id).sampleRate = (int) value;
         break;
       case ID_PRIMARY_R_CHROMATICITY_X:
-        currentTrack.primaryRChromaticityX = (float) value;
+        getCurrentTrack(id).primaryRChromaticityX = (float) value;
         break;
       case ID_PRIMARY_R_CHROMATICITY_Y:
-        currentTrack.primaryRChromaticityY = (float) value;
+        getCurrentTrack(id).primaryRChromaticityY = (float) value;
         break;
       case ID_PRIMARY_G_CHROMATICITY_X:
-        currentTrack.primaryGChromaticityX = (float) value;
+        getCurrentTrack(id).primaryGChromaticityX = (float) value;
         break;
       case ID_PRIMARY_G_CHROMATICITY_Y:
-        currentTrack.primaryGChromaticityY = (float) value;
+        getCurrentTrack(id).primaryGChromaticityY = (float) value;
         break;
       case ID_PRIMARY_B_CHROMATICITY_X:
-        currentTrack.primaryBChromaticityX = (float) value;
+        getCurrentTrack(id).primaryBChromaticityX = (float) value;
         break;
       case ID_PRIMARY_B_CHROMATICITY_Y:
-        currentTrack.primaryBChromaticityY = (float) value;
+        getCurrentTrack(id).primaryBChromaticityY = (float) value;
         break;
       case ID_WHITE_POINT_CHROMATICITY_X:
-        currentTrack.whitePointChromaticityX = (float) value;
+        getCurrentTrack(id).whitePointChromaticityX = (float) value;
         break;
       case ID_WHITE_POINT_CHROMATICITY_Y:
-        currentTrack.whitePointChromaticityY = (float) value;
+        getCurrentTrack(id).whitePointChromaticityY = (float) value;
         break;
       case ID_LUMNINANCE_MAX:
-        currentTrack.maxMasteringLuminance = (float) value;
+        getCurrentTrack(id).maxMasteringLuminance = (float) value;
         break;
       case ID_LUMNINANCE_MIN:
-        currentTrack.minMasteringLuminance = (float) value;
+        getCurrentTrack(id).minMasteringLuminance = (float) value;
         break;
       case ID_PROJECTION_POSE_YAW:
-        currentTrack.projectionPoseYaw = (float) value;
+        getCurrentTrack(id).projectionPoseYaw = (float) value;
         break;
       case ID_PROJECTION_POSE_PITCH:
-        currentTrack.projectionPosePitch = (float) value;
+        getCurrentTrack(id).projectionPosePitch = (float) value;
         break;
       case ID_PROJECTION_POSE_ROLL:
-        currentTrack.projectionPoseRoll = (float) value;
+        getCurrentTrack(id).projectionPoseRoll = (float) value;
         break;
       default:
         break;
@@ -1031,13 +1099,13 @@ public class MatroskaExtractor implements Extractor {
         }
         break;
       case ID_NAME:
-        currentTrack.name = value;
+        getCurrentTrack(id).name = value;
         break;
       case ID_CODEC_ID:
-        currentTrack.codecId = value;
+        getCurrentTrack(id).codecId = value;
         break;
       case ID_LANGUAGE:
-        currentTrack.language = value;
+        getCurrentTrack(id).language = value;
         break;
       default:
         break;
@@ -1053,20 +1121,26 @@ public class MatroskaExtractor implements Extractor {
   protected void binaryElement(int id, int contentSize, ExtractorInput input) throws IOException {
     switch (id) {
       case ID_SEEK_ID:
-        Arrays.fill(seekEntryIdBytes.data, (byte) 0);
-        input.readFully(seekEntryIdBytes.data, 4 - contentSize, contentSize);
+        Arrays.fill(seekEntryIdBytes.getData(), (byte) 0);
+        input.readFully(seekEntryIdBytes.getData(), 4 - contentSize, contentSize);
         seekEntryIdBytes.setPosition(0);
         seekEntryId = (int) seekEntryIdBytes.readUnsignedInt();
         break;
+      case ID_BLOCK_ADD_ID_EXTRA_DATA:
+        handleBlockAddIDExtraData(getCurrentTrack(id), input, contentSize);
+        break;
       case ID_CODEC_PRIVATE:
+        assertInTrackEntry(id);
         currentTrack.codecPrivate = new byte[contentSize];
         input.readFully(currentTrack.codecPrivate, 0, contentSize);
         break;
       case ID_PROJECTION_PRIVATE:
+        assertInTrackEntry(id);
         currentTrack.projectionData = new byte[contentSize];
         input.readFully(currentTrack.projectionData, 0, contentSize);
         break;
       case ID_CONTENT_COMPRESSION_SETTINGS:
+        assertInTrackEntry(id);
         // This extractor only supports header stripping, so the payload is the stripped bytes.
         currentTrack.sampleStrippedBytes = new byte[contentSize];
         input.readFully(currentTrack.sampleStrippedBytes, 0, contentSize);
@@ -1074,8 +1148,9 @@ public class MatroskaExtractor implements Extractor {
       case ID_CONTENT_ENCRYPTION_KEY_ID:
         byte[] encryptionKey = new byte[contentSize];
         input.readFully(encryptionKey, 0, contentSize);
-        currentTrack.cryptoData = new TrackOutput.CryptoData(C.CRYPTO_MODE_AES_CTR, encryptionKey,
-            0, 0); // We assume patternless AES-CTR.
+        getCurrentTrack(id).cryptoData =
+            new TrackOutput.CryptoData(
+                C.CRYPTO_MODE_AES_CTR, encryptionKey, 0, 0); // We assume patternless AES-CTR.
         break;
       case ID_SIMPLE_BLOCK:
       case ID_BLOCK:
@@ -1089,7 +1164,7 @@ public class MatroskaExtractor implements Extractor {
           blockTrackNumberLength = varintReader.getLastLength();
           blockDurationUs = C.TIME_UNSET;
           blockState = BLOCK_STATE_HEADER;
-          scratch.reset();
+          scratch.reset(/* limit= */ 0);
         }
 
         Track track = tracks.get(blockTrackNumber);
@@ -1101,10 +1176,12 @@ public class MatroskaExtractor implements Extractor {
           return;
         }
 
+        track.assertOutputInitialized();
+
         if (blockState == BLOCK_STATE_HEADER) {
           // Read the relative timecode (2 bytes) and flags (1 byte).
           readScratch(input, 3);
-          int lacing = (scratch.data[2] & 0x06) >> 1;
+          int lacing = (scratch.getData()[2] & 0x06) >> 1;
           if (lacing == LACING_NONE) {
             blockSampleCount = 1;
             blockSampleSizes = ensureArrayCapacity(blockSampleSizes, 1);
@@ -1112,7 +1189,7 @@ public class MatroskaExtractor implements Extractor {
           } else {
             // Read the sample count (1 byte).
             readScratch(input, 4);
-            blockSampleCount = (scratch.data[3] & 0xFF) + 1;
+            blockSampleCount = (scratch.getData()[3] & 0xFF) + 1;
             blockSampleSizes = ensureArrayCapacity(blockSampleSizes, blockSampleCount);
             if (lacing == LACING_FIXED_SIZE) {
               int blockLacingSampleSize =
@@ -1126,7 +1203,7 @@ public class MatroskaExtractor implements Extractor {
                 int byteValue;
                 do {
                   readScratch(input, ++headerSize);
-                  byteValue = scratch.data[headerSize - 1] & 0xFF;
+                  byteValue = scratch.getData()[headerSize - 1] & 0xFF;
                   blockSampleSizes[sampleIndex] += byteValue;
                 } while (byteValue == 0xFF);
                 totalSamplesSize += blockSampleSizes[sampleIndex];
@@ -1139,20 +1216,20 @@ public class MatroskaExtractor implements Extractor {
               for (int sampleIndex = 0; sampleIndex < blockSampleCount - 1; sampleIndex++) {
                 blockSampleSizes[sampleIndex] = 0;
                 readScratch(input, ++headerSize);
-                if (scratch.data[headerSize - 1] == 0) {
+                if (scratch.getData()[headerSize - 1] == 0) {
                   throw new ParserException("No valid varint length mask found");
                 }
                 long readValue = 0;
                 for (int i = 0; i < 8; i++) {
                   int lengthMask = 1 << (7 - i);
-                  if ((scratch.data[headerSize - 1] & lengthMask) != 0) {
+                  if ((scratch.getData()[headerSize - 1] & lengthMask) != 0) {
                     int readPosition = headerSize - 1;
                     headerSize += i;
                     readScratch(input, headerSize);
-                    readValue = (scratch.data[readPosition++] & 0xFF) & ~lengthMask;
+                    readValue = (scratch.getData()[readPosition++] & 0xFF) & ~lengthMask;
                     while (readPosition < headerSize) {
                       readValue <<= 8;
-                      readValue |= (scratch.data[readPosition++] & 0xFF);
+                      readValue |= (scratch.getData()[readPosition++] & 0xFF);
                     }
                     // The first read value is the first size. Later values are signed offsets.
                     if (sampleIndex > 0) {
@@ -1179,13 +1256,12 @@ public class MatroskaExtractor implements Extractor {
             }
           }
 
-          int timecode = (scratch.data[0] << 8) | (scratch.data[1] & 0xFF);
+          int timecode = (scratch.getData()[0] << 8) | (scratch.getData()[1] & 0xFF);
           blockTimeUs = clusterTimecodeUs + scaleTimecodeToUs(timecode);
-          boolean isInvisible = (scratch.data[2] & 0x08) == 0x08;
-          boolean isKeyframe = track.type == TRACK_TYPE_AUDIO
-              || (id == ID_SIMPLE_BLOCK && (scratch.data[2] & 0x80) == 0x80);
-          blockFlags = (isKeyframe ? C.BUFFER_FLAG_KEY_FRAME : 0)
-              | (isInvisible ? C.BUFFER_FLAG_DECODE_ONLY : 0);
+          boolean isKeyframe =
+              track.type == TRACK_TYPE_AUDIO
+                  || (id == ID_SIMPLE_BLOCK && (scratch.getData()[2] & 0x80) == 0x80);
+          blockFlags = isKeyframe ? C.BUFFER_FLAG_KEY_FRAME : 0;
           blockState = BLOCK_STATE_DATA;
           blockSampleIndex = 0;
         }
@@ -1227,19 +1303,51 @@ public class MatroskaExtractor implements Extractor {
     }
   }
 
+  protected void handleBlockAddIDExtraData(Track track, ExtractorInput input, int contentSize)
+      throws IOException {
+    if (track.blockAddIdType == BLOCK_ADD_ID_TYPE_DVVC
+        || track.blockAddIdType == BLOCK_ADD_ID_TYPE_DVCC) {
+      track.dolbyVisionConfigBytes = new byte[contentSize];
+      input.readFully(track.dolbyVisionConfigBytes, 0, contentSize);
+    } else {
+      // Unhandled BlockAddIDExtraData.
+      input.skipFully(contentSize);
+    }
+  }
+
   protected void handleBlockAdditionalData(
       Track track, int blockAdditionalId, ExtractorInput input, int contentSize)
       throws IOException {
     if (blockAdditionalId == BLOCK_ADDITIONAL_ID_VP9_ITU_T_35
         && CODEC_ID_VP9.equals(track.codecId)) {
       blockAdditionalData.reset(contentSize);
-      input.readFully(blockAdditionalData.data, 0, contentSize);
+      input.readFully(blockAdditionalData.getData(), 0, contentSize);
     } else {
       // Unhandled block additional data.
       input.skipFully(contentSize);
     }
   }
 
+  @EnsuresNonNull("currentTrack")
+  private void assertInTrackEntry(int id) throws ParserException {
+    if (currentTrack == null) {
+      throw new ParserException("Element " + id + " must be in a TrackEntry");
+    }
+  }
+
+  @EnsuresNonNull({"cueTimesUs", "cueClusterPositions"})
+  private void assertInCues(int id) throws ParserException {
+    if (cueTimesUs == null || cueClusterPositions == null) {
+      throw new ParserException("Element " + id + " must be in a Cues");
+    }
+  }
+
+  private Track getCurrentTrack(int currentElementId) throws ParserException {
+    assertInTrackEntry(currentElementId);
+    return currentTrack;
+  }
+
+  @RequiresNonNull("#1.output")
   private void commitSampleToOutput(
       Track track, long timeUs, @C.BufferFlags int flags, int size, int offset) {
     if (track.trueHdSampleRechunker != null) {
@@ -1251,7 +1359,16 @@ public class MatroskaExtractor implements Extractor {
         } else if (blockDurationUs == C.TIME_UNSET) {
           Log.w(TAG, "Skipping subtitle sample with no duration.");
         } else {
-          setSubtitleEndTime(track.codecId, blockDurationUs, subtitleSample.data);
+          setSubtitleEndTime(track.codecId, blockDurationUs, subtitleSample.getData());
+          // The Matroska spec doesn't clearly define whether subtitle samples are null-terminated
+          // or the sample should instead be sized precisely. We truncate the sample at a null-byte
+          // to gracefully handle null-terminated strings followed by garbage bytes.
+          for (int i = subtitleSample.getPosition(); i < subtitleSample.limit(); i++) {
+            if (subtitleSample.getData()[i] == 0) {
+              subtitleSample.setLimit(i);
+              break;
+            }
+          }
           // Note: If we ever want to support DRM protected subtitles then we'll need to output the
           // appropriate encryption data here.
           track.output.sampleData(subtitleSample, subtitleSample.limit());
@@ -1267,7 +1384,8 @@ public class MatroskaExtractor implements Extractor {
         } else {
           // Append supplemental data.
           int blockAdditionalSize = blockAdditionalData.limit();
-          track.output.sampleData(blockAdditionalData, blockAdditionalSize);
+          track.output.sampleData(
+              blockAdditionalData, blockAdditionalSize, TrackOutput.SAMPLE_DATA_PART_SUPPLEMENTAL);
           size += blockAdditionalSize;
         }
       }
@@ -1285,10 +1403,9 @@ public class MatroskaExtractor implements Extractor {
       return;
     }
     if (scratch.capacity() < requiredLength) {
-      scratch.reset(Arrays.copyOf(scratch.data, Math.max(scratch.data.length * 2, requiredLength)),
-          scratch.limit());
+      scratch.ensureCapacity(max(scratch.capacity() * 2, requiredLength));
     }
-    input.readFully(scratch.data, scratch.limit(), requiredLength - scratch.limit());
+    input.readFully(scratch.getData(), scratch.limit(), requiredLength - scratch.limit());
     scratch.setLimit(requiredLength);
   }
 
@@ -1301,6 +1418,7 @@ public class MatroskaExtractor implements Extractor {
    * @return The final size of the written sample.
    * @throws IOException If an error occurs reading from the input.
    */
+  @RequiresNonNull("#2.output")
   private int writeSampleData(ExtractorInput input, Track track, int size) throws IOException {
     if (CODEC_ID_SUBRIP.equals(track.codecId)) {
       writeSubtitleSampleData(input, SUBRIP_PREFIX, size);
@@ -1317,12 +1435,12 @@ public class MatroskaExtractor implements Extractor {
         // Clear the encrypted flag.
         blockFlags &= ~C.BUFFER_FLAG_ENCRYPTED;
         if (!sampleSignalByteRead) {
-          input.readFully(scratch.data, 0, 1);
+          input.readFully(scratch.getData(), 0, 1);
           sampleBytesRead++;
-          if ((scratch.data[0] & 0x80) == 0x80) {
+          if ((scratch.getData()[0] & 0x80) == 0x80) {
             throw new ParserException("Extension bit is set in signal byte");
           }
-          sampleSignalByte = scratch.data[0];
+          sampleSignalByte = scratch.getData()[0];
           sampleSignalByteRead = true;
         }
         boolean isEncrypted = (sampleSignalByte & 0x01) == 0x01;
@@ -1330,22 +1448,26 @@ public class MatroskaExtractor implements Extractor {
           boolean hasSubsampleEncryption = (sampleSignalByte & 0x02) == 0x02;
           blockFlags |= C.BUFFER_FLAG_ENCRYPTED;
           if (!sampleInitializationVectorRead) {
-            input.readFully(encryptionInitializationVector.data, 0, ENCRYPTION_IV_SIZE);
+            input.readFully(encryptionInitializationVector.getData(), 0, ENCRYPTION_IV_SIZE);
             sampleBytesRead += ENCRYPTION_IV_SIZE;
             sampleInitializationVectorRead = true;
             // Write the signal byte, containing the IV size and the subsample encryption flag.
-            scratch.data[0] = (byte) (ENCRYPTION_IV_SIZE | (hasSubsampleEncryption ? 0x80 : 0x00));
+            scratch.getData()[0] =
+                (byte) (ENCRYPTION_IV_SIZE | (hasSubsampleEncryption ? 0x80 : 0x00));
             scratch.setPosition(0);
-            output.sampleData(scratch, 1);
+            output.sampleData(scratch, 1, TrackOutput.SAMPLE_DATA_PART_ENCRYPTION);
             sampleBytesWritten++;
             // Write the IV.
             encryptionInitializationVector.setPosition(0);
-            output.sampleData(encryptionInitializationVector, ENCRYPTION_IV_SIZE);
+            output.sampleData(
+                encryptionInitializationVector,
+                ENCRYPTION_IV_SIZE,
+                TrackOutput.SAMPLE_DATA_PART_ENCRYPTION);
             sampleBytesWritten += ENCRYPTION_IV_SIZE;
           }
           if (hasSubsampleEncryption) {
             if (!samplePartitionCountRead) {
-              input.readFully(scratch.data, 0, 1);
+              input.readFully(scratch.getData(), 0, 1);
               sampleBytesRead++;
               scratch.setPosition(0);
               samplePartitionCount = scratch.readUnsignedByte();
@@ -1353,7 +1475,7 @@ public class MatroskaExtractor implements Extractor {
             }
             int samplePartitionDataSize = samplePartitionCount * 4;
             scratch.reset(samplePartitionDataSize);
-            input.readFully(scratch.data, 0, samplePartitionDataSize);
+            input.readFully(scratch.getData(), 0, samplePartitionDataSize);
             sampleBytesRead += samplePartitionDataSize;
             short subsampleCount = (short) (1 + (samplePartitionCount / 2));
             int subsampleDataSize = 2 + 6 * subsampleCount;
@@ -1388,7 +1510,10 @@ public class MatroskaExtractor implements Extractor {
               encryptionSubsampleDataBuffer.putInt(0);
             }
             encryptionSubsampleData.reset(encryptionSubsampleDataBuffer.array(), subsampleDataSize);
-            output.sampleData(encryptionSubsampleData, subsampleDataSize);
+            output.sampleData(
+                encryptionSubsampleData,
+                subsampleDataSize,
+                TrackOutput.SAMPLE_DATA_PART_ENCRYPTION);
             sampleBytesWritten += subsampleDataSize;
           }
         }
@@ -1399,15 +1524,15 @@ public class MatroskaExtractor implements Extractor {
 
       if (track.maxBlockAdditionId > 0) {
         blockFlags |= C.BUFFER_FLAG_HAS_SUPPLEMENTAL_DATA;
-        blockAdditionalData.reset();
+        blockAdditionalData.reset(/* limit= */ 0);
         // If there is supplemental data, the structure of the sample data is:
         // sample size (4 bytes) || sample data || supplemental data
         scratch.reset(/* limit= */ 4);
-        scratch.data[0] = (byte) ((size >> 24) & 0xFF);
-        scratch.data[1] = (byte) ((size >> 16) & 0xFF);
-        scratch.data[2] = (byte) ((size >> 8) & 0xFF);
-        scratch.data[3] = (byte) (size & 0xFF);
-        output.sampleData(scratch, 4);
+        scratch.getData()[0] = (byte) ((size >> 24) & 0xFF);
+        scratch.getData()[1] = (byte) ((size >> 16) & 0xFF);
+        scratch.getData()[2] = (byte) ((size >> 8) & 0xFF);
+        scratch.getData()[3] = (byte) (size & 0xFF);
+        output.sampleData(scratch, 4, TrackOutput.SAMPLE_DATA_PART_SUPPLEMENTAL);
         sampleBytesWritten += 4;
       }
 
@@ -1420,7 +1545,7 @@ public class MatroskaExtractor implements Extractor {
 
       // Zero the top three bytes of the array that we'll use to decode nal unit lengths, in case
       // they're only 1 or 2 bytes long.
-      byte[] nalLengthData = nalLength.data;
+      byte[] nalLengthData = nalLength.getData();
       nalLengthData[0] = 0;
       nalLengthData[1] = 0;
       nalLengthData[2] = 0;
@@ -1451,7 +1576,7 @@ public class MatroskaExtractor implements Extractor {
       }
     } else {
       if (track.trueHdSampleRechunker != null) {
-        Assertions.checkState(sampleStrippedBytes.limit() == 0);
+        checkState(sampleStrippedBytes.limit() == 0);
         track.trueHdSampleRechunker.startSample(input);
       }
       while (sampleBytesRead < size) {
@@ -1497,7 +1622,7 @@ public class MatroskaExtractor implements Extractor {
     samplePartitionCount = 0;
     sampleSignalByte = (byte) 0;
     sampleInitializationVectorRead = false;
-    sampleStrippedBytes.reset();
+    sampleStrippedBytes.reset(/* limit= */ 0);
   }
 
   private void writeSubtitleSampleData(ExtractorInput input, byte[] samplePrefix, int size)
@@ -1506,12 +1631,13 @@ public class MatroskaExtractor implements Extractor {
     if (subtitleSample.capacity() < sizeWithPrefix) {
       // Initialize subripSample to contain the required prefix and have space to hold a subtitle
       // twice as long as this one.
-      subtitleSample.data = Arrays.copyOf(samplePrefix, sizeWithPrefix + size);
+      subtitleSample.reset(Arrays.copyOf(samplePrefix, sizeWithPrefix + size));
     } else {
-      System.arraycopy(samplePrefix, 0, subtitleSample.data, 0, samplePrefix.length);
+      System.arraycopy(samplePrefix, 0, subtitleSample.getData(), 0, samplePrefix.length);
     }
-    input.readFully(subtitleSample.data, samplePrefix.length, size);
-    subtitleSample.reset(sizeWithPrefix);
+    input.readFully(subtitleSample.getData(), samplePrefix.length, size);
+    subtitleSample.setPosition(0);
+    subtitleSample.setLimit(sizeWithPrefix);
     // Defer writing the data to the track output. We need to modify the sample data by setting
     // the correct end timecode, which we might not have yet.
   }
@@ -1556,7 +1682,7 @@ public class MatroskaExtractor implements Extractor {
    */
   private static byte[] formatSubtitleTimecode(
       long timeUs, String timecodeFormat, long lastTimecodeValueScalingFactor) {
-    Assertions.checkArgument(timeUs != C.TIME_UNSET);
+    checkArgument(timeUs != C.TIME_UNSET);
     byte[] timeCodeData;
     int hours = (int) (timeUs / (3600 * C.MICROS_PER_SECOND));
     timeUs -= (hours * 3600 * C.MICROS_PER_SECOND);
@@ -1577,7 +1703,7 @@ public class MatroskaExtractor implements Extractor {
    */
   private void writeToTarget(ExtractorInput input, byte[] target, int offset, int length)
       throws IOException {
-    int pendingStrippedBytes = Math.min(length, sampleStrippedBytes.bytesLeft());
+    int pendingStrippedBytes = min(length, sampleStrippedBytes.bytesLeft());
     input.readFully(target, offset + pendingStrippedBytes, length - pendingStrippedBytes);
     if (pendingStrippedBytes > 0) {
       sampleStrippedBytes.readBytes(target, offset, pendingStrippedBytes);
@@ -1593,7 +1719,7 @@ public class MatroskaExtractor implements Extractor {
     int bytesWritten;
     int strippedBytesLeft = sampleStrippedBytes.bytesLeft();
     if (strippedBytesLeft > 0) {
-      bytesWritten = Math.min(length, strippedBytesLeft);
+      bytesWritten = min(length, strippedBytesLeft);
       output.sampleData(sampleStrippedBytes, bytesWritten);
     } else {
       bytesWritten = output.sampleData(input, length, false);
@@ -1607,13 +1733,12 @@ public class MatroskaExtractor implements Extractor {
    * @return The built {@link SeekMap}. The returned {@link SeekMap} may be unseekable if cues
    *     information was missing or incomplete.
    */
-  private SeekMap buildSeekMap() {
+  private SeekMap buildSeekMap(
+      @Nullable LongArray cueTimesUs, @Nullable LongArray cueClusterPositions) {
     if (segmentContentPosition == C.POSITION_UNSET || durationUs == C.TIME_UNSET
         || cueTimesUs == null || cueTimesUs.size() == 0
         || cueClusterPositions == null || cueClusterPositions.size() != cueTimesUs.size()) {
       // Cues information is missing or incomplete.
-      cueTimesUs = null;
-      cueClusterPositions = null;
       return new SeekMap.Unseekable(durationUs);
     }
     int cuePointsSize = cueTimesUs.size();
@@ -1642,8 +1767,6 @@ public class MatroskaExtractor implements Extractor {
       timesUs = Arrays.copyOf(timesUs, timesUs.length - 1);
     }
 
-    cueTimesUs = null;
-    cueClusterPositions = null;
     return new ChunkIndex(sizes, offsets, durationsUs, timesUs);
   }
 
@@ -1681,51 +1804,63 @@ public class MatroskaExtractor implements Extractor {
   }
 
   private static boolean isCodecSupported(String codecId) {
-    return CODEC_ID_VP8.equals(codecId)
-        || CODEC_ID_VP9.equals(codecId)
-        || CODEC_ID_AV1.equals(codecId)
-        || CODEC_ID_MPEG2.equals(codecId)
-        || CODEC_ID_MPEG4_SP.equals(codecId)
-        || CODEC_ID_MPEG4_ASP.equals(codecId)
-        || CODEC_ID_MPEG4_AP.equals(codecId)
-        || CODEC_ID_H264.equals(codecId)
-        || CODEC_ID_H265.equals(codecId)
-        || CODEC_ID_FOURCC.equals(codecId)
-        || CODEC_ID_THEORA.equals(codecId)
-        || CODEC_ID_OPUS.equals(codecId)
-        || CODEC_ID_VORBIS.equals(codecId)
-        || CODEC_ID_AAC.equals(codecId)
-        || CODEC_ID_MP2.equals(codecId)
-        || CODEC_ID_MP3.equals(codecId)
-        || CODEC_ID_AC3.equals(codecId)
-        || CODEC_ID_E_AC3.equals(codecId)
-        || CODEC_ID_TRUEHD.equals(codecId)
-        || CODEC_ID_DTS.equals(codecId)
-        || CODEC_ID_DTS_EXPRESS.equals(codecId)
-        || CODEC_ID_DTS_LOSSLESS.equals(codecId)
-        || CODEC_ID_FLAC.equals(codecId)
-        || CODEC_ID_ACM.equals(codecId)
-        || CODEC_ID_PCM_INT_LIT.equals(codecId)
-        || CODEC_ID_SUBRIP.equals(codecId)
-        || CODEC_ID_ASS.equals(codecId)
-        || CODEC_ID_VOBSUB.equals(codecId)
-        || CODEC_ID_PGS.equals(codecId)
-        || CODEC_ID_DVBSUB.equals(codecId);
+    switch (codecId) {
+      case CODEC_ID_VP8:
+      case CODEC_ID_VP9:
+      case CODEC_ID_AV1:
+      case CODEC_ID_MPEG2:
+      case CODEC_ID_MPEG4_SP:
+      case CODEC_ID_MPEG4_ASP:
+      case CODEC_ID_MPEG4_AP:
+      case CODEC_ID_H264:
+      case CODEC_ID_H265:
+      case CODEC_ID_FOURCC:
+      case CODEC_ID_THEORA:
+      case CODEC_ID_OPUS:
+      case CODEC_ID_VORBIS:
+      case CODEC_ID_AAC:
+      case CODEC_ID_MP2:
+      case CODEC_ID_MP3:
+      case CODEC_ID_AC3:
+      case CODEC_ID_E_AC3:
+      case CODEC_ID_TRUEHD:
+      case CODEC_ID_DTS:
+      case CODEC_ID_DTS_EXPRESS:
+      case CODEC_ID_DTS_LOSSLESS:
+      case CODEC_ID_FLAC:
+      case CODEC_ID_ACM:
+      case CODEC_ID_PCM_INT_LIT:
+      case CODEC_ID_PCM_INT_BIG:
+      case CODEC_ID_PCM_FLOAT:
+      case CODEC_ID_SUBRIP:
+      case CODEC_ID_ASS:
+      case CODEC_ID_VOBSUB:
+      case CODEC_ID_PGS:
+      case CODEC_ID_DVBSUB:
+        return true;
+      default:
+        return false;
+    }
   }
 
   /**
    * Returns an array that can store (at least) {@code length} elements, which will be either a new
    * array or {@code array} if it's not null and large enough.
    */
-  private static int[] ensureArrayCapacity(int[] array, int length) {
+  private static int[] ensureArrayCapacity(@Nullable int[] array, int length) {
     if (array == null) {
       return new int[length];
     } else if (array.length >= length) {
       return array;
     } else {
       // Double the size to avoid allocating constantly if the required length increases gradually.
-      return new int[Math.max(array.length * 2, length)];
+      return new int[max(array.length * 2, length)];
     }
+  }
+
+  @EnsuresNonNull("extractorOutput")
+  private void assertInitialized() {
+    checkStateNotNull(extractorOutput);
   }
 
   /** Passes events through to the outer {@link MatroskaExtractor}. */
@@ -1809,6 +1944,7 @@ public class MatroskaExtractor implements Extractor {
       foundSyncframe = true;
     }
 
+    @RequiresNonNull("#1.output")
     public void sampleMetadata(
         Track track, long timeUs, @C.BufferFlags int flags, int size, int offset) {
       if (!foundSyncframe) {
@@ -1827,6 +1963,7 @@ public class MatroskaExtractor implements Extractor {
       }
     }
 
+    @RequiresNonNull("#1.output")
     public void outputPendingSampleMetadata(Track track) {
       if (chunkSampleCount > 0) {
         track.output.sampleMetadata(
@@ -1839,7 +1976,7 @@ public class MatroskaExtractor implements Extractor {
   private static final class Track {
 
     private static final int DISPLAY_UNIT_PIXELS = 0;
-    private static final int MAX_CHROMATICITY = 50000;  // Defined in CTA-861.3.
+    private static final int MAX_CHROMATICITY = 50_000; // Defined in CTA-861.3.
     /**
      * Default max content light level (CLL) that should be encoded into hdrStaticInfo.
      */
@@ -1851,17 +1988,18 @@ public class MatroskaExtractor implements Extractor {
     private static final int DEFAULT_MAX_FALL = 200;  // nits.
 
     // Common elements.
-    public String name;
-    public String codecId;
+    public @MonotonicNonNull String name;
+    public @MonotonicNonNull String codecId;
     public int number;
     public int type;
     public int defaultSampleDurationNs;
     public int maxBlockAdditionId;
+    private int blockAddIdType;
     public boolean hasContentEncryption;
-    public byte[] sampleStrippedBytes;
-    public TrackOutput.CryptoData cryptoData;
-    public byte[] codecPrivate;
-    public DrmInitData drmInitData;
+    public byte @MonotonicNonNull [] sampleStrippedBytes;
+    public TrackOutput.@MonotonicNonNull CryptoData cryptoData;
+    public byte @MonotonicNonNull [] codecPrivate;
+    public @MonotonicNonNull DrmInitData drmInitData;
 
     // Video elements.
     public int width = Format.NO_VALUE;
@@ -1873,7 +2011,7 @@ public class MatroskaExtractor implements Extractor {
     public float projectionPoseYaw = 0f;
     public float projectionPosePitch = 0f;
     public float projectionPoseRoll = 0f;
-    public byte[] projectionData = null;
+    public byte @MonotonicNonNull [] projectionData = null;
     @C.StereoMode
     public int stereoMode = Format.NO_VALUE;
     public boolean hasColorInfo = false;
@@ -1895,6 +2033,7 @@ public class MatroskaExtractor implements Extractor {
     public float whitePointChromaticityY = Format.NO_VALUE;
     public float maxMasteringLuminance = Format.NO_VALUE;
     public float minMasteringLuminance = Format.NO_VALUE;
+    public byte @MonotonicNonNull [] dolbyVisionConfigBytes;
 
     // Audio elements. Initially set to their default values.
     public int channelCount = 1;
@@ -1902,7 +2041,7 @@ public class MatroskaExtractor implements Extractor {
     public int sampleRate = 8000;
     public long codecDelayNs = 0;
     public long seekPreRollNs = 0;
-    @Nullable public TrueHdSampleRechunker trueHdSampleRechunker;
+    public @MonotonicNonNull TrueHdSampleRechunker trueHdSampleRechunker;
 
     // Text elements.
     public boolean flagForced;
@@ -1910,15 +2049,18 @@ public class MatroskaExtractor implements Extractor {
     private String language = "eng";
 
     // Set when the output is initialized. nalUnitLengthFieldLength is only set for H264/H265.
-    public TrackOutput output;
+    public @MonotonicNonNull TrackOutput output;
     public int nalUnitLengthFieldLength;
 
     /** Initializes the track with an output. */
+    @RequiresNonNull("codecId")
+    @EnsuresNonNull("this.output")
     public void initializeOutput(ExtractorOutput output, int trackId) throws ParserException {
       String mimeType;
       int maxInputSize = Format.NO_VALUE;
       @C.PcmEncoding int pcmEncoding = Format.NO_VALUE;
       @Nullable List<byte[]> initializationData = null;
+      @Nullable String codecs = null;
       switch (codecId) {
         case CODEC_ID_VP8:
           mimeType = MimeTypes.VIDEO_VP8;
@@ -1941,19 +2083,19 @@ public class MatroskaExtractor implements Extractor {
           break;
         case CODEC_ID_H264:
           mimeType = MimeTypes.VIDEO_H264;
-          AvcConfig avcConfig = AvcConfig.parse(new ParsableByteArray(codecPrivate));
+          AvcConfig avcConfig = AvcConfig.parse(new ParsableByteArray(getCodecPrivate(codecId)));
           initializationData = avcConfig.initializationData;
           nalUnitLengthFieldLength = avcConfig.nalUnitLengthFieldLength;
           break;
         case CODEC_ID_H265:
           mimeType = MimeTypes.VIDEO_H265;
-          HevcConfig hevcConfig = HevcConfig.parse(new ParsableByteArray(codecPrivate));
+          HevcConfig hevcConfig = HevcConfig.parse(new ParsableByteArray(getCodecPrivate(codecId)));
           initializationData = hevcConfig.initializationData;
           nalUnitLengthFieldLength = hevcConfig.nalUnitLengthFieldLength;
           break;
         case CODEC_ID_FOURCC:
           Pair<String, @NullableType List<byte[]>> pair =
-              parseFourCcPrivate(new ParsableByteArray(codecPrivate));
+              parseFourCcPrivate(new ParsableByteArray(getCodecPrivate(codecId)));
           mimeType = pair.first;
           initializationData = pair.second;
           break;
@@ -1965,13 +2107,13 @@ public class MatroskaExtractor implements Extractor {
         case CODEC_ID_VORBIS:
           mimeType = MimeTypes.AUDIO_VORBIS;
           maxInputSize = VORBIS_MAX_INPUT_SIZE;
-          initializationData = parseVorbisCodecPrivate(codecPrivate);
+          initializationData = parseVorbisCodecPrivate(getCodecPrivate(codecId));
           break;
         case CODEC_ID_OPUS:
           mimeType = MimeTypes.AUDIO_OPUS;
           maxInputSize = OPUS_MAX_INPUT_SIZE;
           initializationData = new ArrayList<>(3);
-          initializationData.add(codecPrivate);
+          initializationData.add(getCodecPrivate(codecId));
           initializationData.add(
               ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(codecDelayNs).array());
           initializationData.add(
@@ -1979,7 +2121,13 @@ public class MatroskaExtractor implements Extractor {
           break;
         case CODEC_ID_AAC:
           mimeType = MimeTypes.AUDIO_AAC;
-          initializationData = Collections.singletonList(codecPrivate);
+          initializationData = Collections.singletonList(getCodecPrivate(codecId));
+          AacUtil.Config aacConfig = AacUtil.parseAudioSpecificConfig(codecPrivate);
+          // Update sampleRate and channelCount from the AudioSpecificConfig initialization data,
+          // which is more reliable. See [Internal: b/10903778].
+          sampleRate = aacConfig.sampleRateHz;
+          channelCount = aacConfig.channelCount;
+          codecs = aacConfig.codecs;
           break;
         case CODEC_ID_MP2:
           mimeType = MimeTypes.AUDIO_MPEG_L2;
@@ -2008,11 +2156,11 @@ public class MatroskaExtractor implements Extractor {
           break;
         case CODEC_ID_FLAC:
           mimeType = MimeTypes.AUDIO_FLAC;
-          initializationData = Collections.singletonList(codecPrivate);
+          initializationData = Collections.singletonList(getCodecPrivate(codecId));
           break;
         case CODEC_ID_ACM:
           mimeType = MimeTypes.AUDIO_RAW;
-          if (parseMsAcmCodecPrivate(new ParsableByteArray(codecPrivate))) {
+          if (parseMsAcmCodecPrivate(new ParsableByteArray(getCodecPrivate(codecId)))) {
             pcmEncoding = Util.getPcmEncoding(audioBitDepth);
             if (pcmEncoding == C.ENCODING_INVALID) {
               pcmEncoding = Format.NO_VALUE;
@@ -2031,8 +2179,44 @@ public class MatroskaExtractor implements Extractor {
           if (pcmEncoding == C.ENCODING_INVALID) {
             pcmEncoding = Format.NO_VALUE;
             mimeType = MimeTypes.AUDIO_UNKNOWN;
-            Log.w(TAG, "Unsupported PCM bit depth: " + audioBitDepth + ". Setting mimeType to "
-                + mimeType);
+            Log.w(
+                TAG,
+                "Unsupported little endian PCM bit depth: "
+                    + audioBitDepth
+                    + ". Setting mimeType to "
+                    + mimeType);
+          }
+          break;
+        case CODEC_ID_PCM_INT_BIG:
+          mimeType = MimeTypes.AUDIO_RAW;
+          if (audioBitDepth == 8) {
+            pcmEncoding = C.ENCODING_PCM_8BIT;
+          } else if (audioBitDepth == 16) {
+            pcmEncoding = C.ENCODING_PCM_16BIT_BIG_ENDIAN;
+          } else {
+            pcmEncoding = Format.NO_VALUE;
+            mimeType = MimeTypes.AUDIO_UNKNOWN;
+            Log.w(
+                TAG,
+                "Unsupported big endian PCM bit depth: "
+                    + audioBitDepth
+                    + ". Setting mimeType to "
+                    + mimeType);
+          }
+          break;
+        case CODEC_ID_PCM_FLOAT:
+          mimeType = MimeTypes.AUDIO_RAW;
+          if (audioBitDepth == 32) {
+            pcmEncoding = C.ENCODING_PCM_FLOAT;
+          } else {
+            pcmEncoding = Format.NO_VALUE;
+            mimeType = MimeTypes.AUDIO_UNKNOWN;
+            Log.w(
+                TAG,
+                "Unsupported floating point PCM bit depth: "
+                    + audioBitDepth
+                    + ". Setting mimeType to "
+                    + mimeType);
           }
           break;
         case CODEC_ID_SUBRIP:
@@ -2040,10 +2224,11 @@ public class MatroskaExtractor implements Extractor {
           break;
         case CODEC_ID_ASS:
           mimeType = MimeTypes.TEXT_SSA;
+          initializationData = ImmutableList.of(SSA_DIALOGUE_FORMAT, getCodecPrivate(codecId));
           break;
         case CODEC_ID_VOBSUB:
           mimeType = MimeTypes.APPLICATION_VOBSUB;
-          initializationData = Collections.singletonList(codecPrivate);
+          initializationData = ImmutableList.of(getCodecPrivate(codecId));
           break;
         case CODEC_ID_PGS:
           mimeType = MimeTypes.APPLICATION_PGS;
@@ -2051,11 +2236,22 @@ public class MatroskaExtractor implements Extractor {
         case CODEC_ID_DVBSUB:
           mimeType = MimeTypes.APPLICATION_DVBSUBS;
           // Init data: composition_page (2), ancillary_page (2)
-          initializationData = Collections.singletonList(new byte[] {codecPrivate[0],
-              codecPrivate[1], codecPrivate[2], codecPrivate[3]});
+          byte[] initializationDataBytes = new byte[4];
+          System.arraycopy(getCodecPrivate(codecId), 0, initializationDataBytes, 0, 4);
+          initializationData = ImmutableList.of(initializationDataBytes);
           break;
         default:
           throw new ParserException("Unrecognized codec identifier.");
+      }
+
+      if (dolbyVisionConfigBytes != null) {
+        @Nullable
+        DolbyVisionConfig dolbyVisionConfig =
+            DolbyVisionConfig.parse(new ParsableByteArray(this.dolbyVisionConfigBytes));
+        if (dolbyVisionConfig != null) {
+          codecs = dolbyVisionConfig.codecs;
+          mimeType = MimeTypes.VIDEO_DOLBY_VISION;
+        }
       }
 
       @C.SelectionFlags int selectionFlags = 0;
@@ -2088,15 +2284,9 @@ public class MatroskaExtractor implements Extractor {
           colorInfo = new ColorInfo(colorSpace, colorRange, colorTransfer, hdrStaticInfo);
         }
         int rotationDegrees = Format.NO_VALUE;
-        // Some HTC devices signal rotation in track names.
-        if ("htc_video_rotA-000".equals(name)) {
-          rotationDegrees = 0;
-        } else if ("htc_video_rotA-090".equals(name)) {
-          rotationDegrees = 90;
-        } else if ("htc_video_rotA-180".equals(name)) {
-          rotationDegrees = 180;
-        } else if ("htc_video_rotA-270".equals(name)) {
-          rotationDegrees = 270;
+
+        if (name != null && TRACK_NAME_TO_ROTATION_DEGREES.containsKey(name)) {
+          rotationDegrees = TRACK_NAME_TO_ROTATION_DEGREES.get(name);
         }
         if (projectionType == C.PROJECTION_RECTANGULAR
             && Float.compare(projectionPoseYaw, 0f) == 0
@@ -2121,19 +2311,18 @@ public class MatroskaExtractor implements Extractor {
             .setProjectionData(projectionData)
             .setStereoMode(stereoMode)
             .setColorInfo(colorInfo);
-      } else if (MimeTypes.APPLICATION_SUBRIP.equals(mimeType)) {
-        type = C.TRACK_TYPE_TEXT;
-      } else if (MimeTypes.TEXT_SSA.equals(mimeType)) {
-        type = C.TRACK_TYPE_TEXT;
-        initializationData = new ArrayList<>(2);
-        initializationData.add(SSA_DIALOGUE_FORMAT);
-        initializationData.add(codecPrivate);
-      } else if (MimeTypes.APPLICATION_VOBSUB.equals(mimeType)
+      } else if (MimeTypes.APPLICATION_SUBRIP.equals(mimeType)
+          || MimeTypes.TEXT_SSA.equals(mimeType)
+          || MimeTypes.APPLICATION_VOBSUB.equals(mimeType)
           || MimeTypes.APPLICATION_PGS.equals(mimeType)
           || MimeTypes.APPLICATION_DVBSUBS.equals(mimeType)) {
         type = C.TRACK_TYPE_TEXT;
       } else {
         throw new ParserException("Unexpected MIME type.");
+      }
+
+      if (name != null && !TRACK_NAME_TO_ROTATION_DEGREES.containsKey(name)) {
+        formatBuilder.setLabel(name);
       }
 
       Format format =
@@ -2144,6 +2333,7 @@ public class MatroskaExtractor implements Extractor {
               .setLanguage(language)
               .setSelectionFlags(selectionFlags)
               .setInitializationData(initializationData)
+              .setCodecs(codecs)
               .setDrmInitData(drmInitData)
               .build();
 
@@ -2152,6 +2342,7 @@ public class MatroskaExtractor implements Extractor {
     }
 
     /** Forces any pending sample metadata to be flushed to the output. */
+    @RequiresNonNull("output")
     public void outputPendingSampleMetadata() {
       if (trueHdSampleRechunker != null) {
         trueHdSampleRechunker.outputPendingSampleMetadata(this);
@@ -2217,7 +2408,7 @@ public class MatroskaExtractor implements Extractor {
           // Search for the initialization data from the end of the BITMAPINFOHEADER. The last 20
           // bytes of which are: sizeImage(4), xPel/m (4), yPel/m (4), clrUsed(4), clrImportant(4).
           int startOffset = buffer.getPosition() + 20;
-          byte[] bufferData = buffer.data;
+          byte[] bufferData = buffer.getData();
           for (int offset = startOffset; offset < bufferData.length - 4; offset++) {
             if (bufferData[offset] == 0x00
                 && bufferData[offset + 1] == 0x00
@@ -2311,5 +2502,26 @@ public class MatroskaExtractor implements Extractor {
         throw new ParserException("Error parsing MS/ACM codec private");
       }
     }
+
+    /**
+     * Checks that the track has an output.
+     *
+     * <p>It is unfortunately not possible to mark {@link MatroskaExtractor#tracks} as only
+     * containing tracks with output with the nullness checker. This method is used to check that
+     * fact at runtime.
+     */
+    @EnsuresNonNull("output")
+    private void assertOutputInitialized() {
+      checkNotNull(output);
+    }
+
+    @EnsuresNonNull("codecPrivate")
+    private byte[] getCodecPrivate(String codecId) throws ParserException {
+      if (codecPrivate == null) {
+        throw new ParserException("Missing CodecPrivate for codec " + codecId);
+      }
+      return codecPrivate;
+    }
   }
+
 }

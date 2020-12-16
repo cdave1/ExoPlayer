@@ -15,7 +15,7 @@
  */
 package com.google.android.exoplayer2.ext.av1;
 
-import static java.lang.Runtime.getRuntime;
+import static com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.REUSE_RESULT_YES_WITHOUT_RECONFIGURATION;
 
 import android.os.Handler;
 import android.view.Surface;
@@ -23,6 +23,7 @@ import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.RendererCapabilities;
+import com.google.android.exoplayer2.decoder.DecoderReuseEvaluation;
 import com.google.android.exoplayer2.drm.ExoMediaCrypto;
 import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.TraceUtil;
@@ -34,10 +35,20 @@ import com.google.android.exoplayer2.video.VideoRendererEventListener;
 /** Decodes and renders video using libgav1 decoder. */
 public class Libgav1VideoRenderer extends DecoderVideoRenderer {
 
+  /**
+   * Attempts to use as many threads as performance processors available on the device. If the
+   * number of performance processors cannot be detected, the number of available processors is
+   * used.
+   */
+  public static final int THREAD_COUNT_AUTODETECT = 0;
+
   private static final String TAG = "Libgav1VideoRenderer";
   private static final int DEFAULT_NUM_OF_INPUT_BUFFERS = 4;
   private static final int DEFAULT_NUM_OF_OUTPUT_BUFFERS = 4;
-  /* Default size based on 720p resolution video compressed by a factor of two. */
+  /**
+   * Default input buffer size in bytes, based on 720p resolution video compressed by a factor of
+   * two.
+   */
   private static final int DEFAULT_INPUT_BUFFER_SIZE =
       Util.ceilDivide(1280, 64) * Util.ceilDivide(720, 64) * (64 * 64 * 3 / 2) / 2;
 
@@ -74,7 +85,7 @@ public class Libgav1VideoRenderer extends DecoderVideoRenderer {
         eventHandler,
         eventListener,
         maxDroppedFramesToNotify,
-        /* threads= */ getRuntime().availableProcessors(),
+        THREAD_COUNT_AUTODETECT,
         DEFAULT_NUM_OF_INPUT_BUFFERS,
         DEFAULT_NUM_OF_OUTPUT_BUFFERS);
   }
@@ -89,7 +100,9 @@ public class Libgav1VideoRenderer extends DecoderVideoRenderer {
    * @param eventListener A listener of events. May be null if delivery of events is not required.
    * @param maxDroppedFramesToNotify The maximum number of frames that can be dropped between
    *     invocations of {@link VideoRendererEventListener#onDroppedFrames(int, long)}.
-   * @param threads Number of threads libgav1 will use to decode.
+   * @param threads Number of threads libgav1 will use to decode. If {@link
+   *     #THREAD_COUNT_AUTODETECT} is passed, then the number of threads to use is autodetected
+   *     based on CPU capabilities.
    * @param numInputBuffers Number of input buffers.
    * @param numOutputBuffers Number of output buffers.
    */
@@ -117,12 +130,13 @@ public class Libgav1VideoRenderer extends DecoderVideoRenderer {
   public final int supportsFormat(Format format) {
     if (!MimeTypes.VIDEO_AV1.equalsIgnoreCase(format.sampleMimeType)
         || !Gav1Library.isAvailable()) {
-      return RendererCapabilities.create(FORMAT_UNSUPPORTED_TYPE);
+      return RendererCapabilities.create(C.FORMAT_UNSUPPORTED_TYPE);
     }
-    if (format.drmInitData != null && format.exoMediaCryptoType == null) {
-      return RendererCapabilities.create(FORMAT_UNSUPPORTED_DRM);
+    if (format.exoMediaCryptoType != null) {
+      return RendererCapabilities.create(C.FORMAT_UNSUPPORTED_DRM);
     }
-    return RendererCapabilities.create(FORMAT_HANDLED, ADAPTIVE_SEAMLESS, TUNNELING_NOT_SUPPORTED);
+    return RendererCapabilities.create(
+        C.FORMAT_HANDLED, ADAPTIVE_SEAMLESS, TUNNELING_NOT_SUPPORTED);
   }
 
   @Override
@@ -154,5 +168,16 @@ public class Libgav1VideoRenderer extends DecoderVideoRenderer {
     if (decoder != null) {
       decoder.setOutputMode(outputMode);
     }
+  }
+
+  @Override
+  protected DecoderReuseEvaluation canReuseDecoder(
+      String decoderName, Format oldFormat, Format newFormat) {
+    return new DecoderReuseEvaluation(
+        decoderName,
+        oldFormat,
+        newFormat,
+        REUSE_RESULT_YES_WITHOUT_RECONFIGURATION,
+        /* discardReasons= */ 0);
   }
 }

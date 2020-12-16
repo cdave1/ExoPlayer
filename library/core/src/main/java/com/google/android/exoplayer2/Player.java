@@ -23,16 +23,19 @@ import android.view.SurfaceView;
 import android.view.TextureView;
 import androidx.annotation.IntDef;
 import androidx.annotation.Nullable;
-import com.google.android.exoplayer2.C.VideoScalingMode;
 import com.google.android.exoplayer2.audio.AudioAttributes;
 import com.google.android.exoplayer2.audio.AudioListener;
 import com.google.android.exoplayer2.audio.AuxEffectInfo;
 import com.google.android.exoplayer2.device.DeviceInfo;
 import com.google.android.exoplayer2.device.DeviceListener;
+import com.google.android.exoplayer2.metadata.Metadata;
 import com.google.android.exoplayer2.metadata.MetadataOutput;
 import com.google.android.exoplayer2.source.TrackGroupArray;
+import com.google.android.exoplayer2.text.Cue;
 import com.google.android.exoplayer2.text.TextOutput;
 import com.google.android.exoplayer2.trackselection.TrackSelectionArray;
+import com.google.android.exoplayer2.trackselection.TrackSelectorInterface;
+import com.google.android.exoplayer2.util.MutableFlags;
 import com.google.android.exoplayer2.util.Util;
 import com.google.android.exoplayer2.video.VideoDecoderOutputBufferRenderer;
 import com.google.android.exoplayer2.video.VideoFrameMetadataListener;
@@ -173,14 +176,14 @@ public interface Player {
   interface VideoComponent {
 
     /**
-     * Sets the {@link VideoScalingMode}.
+     * Sets the {@link C.VideoScalingMode}.
      *
-     * @param videoScalingMode The {@link VideoScalingMode}.
+     * @param videoScalingMode The {@link C.VideoScalingMode}.
      */
-    void setVideoScalingMode(@VideoScalingMode int videoScalingMode);
+    void setVideoScalingMode(@C.VideoScalingMode int videoScalingMode);
 
-    /** Returns the {@link VideoScalingMode}. */
-    @VideoScalingMode
+    /** Returns the {@link C.VideoScalingMode}. */
+    @C.VideoScalingMode
     int getVideoScalingMode();
 
     /**
@@ -310,9 +313,9 @@ public interface Player {
 
     /**
      * Sets the video decoder output buffer renderer. This is intended for use only with extension
-     * renderers that accept {@link C#MSG_SET_VIDEO_DECODER_OUTPUT_BUFFER_RENDERER}. For most use
-     * cases, an output surface or view should be passed via {@link #setVideoSurface(Surface)} or
-     * {@link #setVideoSurfaceView(SurfaceView)} instead.
+     * renderers that accept {@link Renderer#MSG_SET_VIDEO_DECODER_OUTPUT_BUFFER_RENDERER}. For most
+     * use cases, an output surface or view should be passed via {@link #setVideoSurface(Surface)}
+     * or {@link #setVideoSurfaceView(SurfaceView)} instead.
      *
      * @param videoDecoderOutputBufferRenderer The video decoder output buffer renderer, or {@code
      *     null} to clear the output buffer renderer.
@@ -349,6 +352,9 @@ public interface Player {
      * @param listener The output to remove.
      */
     void removeTextOutput(TextOutput listener);
+
+    /** Returns the current {@link Cue Cues}. This list may be empty. */
+    List<Cue> getCurrentCues();
   }
 
   /** The metadata component of a {@link Player}. */
@@ -370,8 +376,6 @@ public interface Player {
   }
 
   /** The device component of a {@link Player}. */
-  // Note: It's mostly from the androidx.media.VolumeProviderCompat and
-  //  androidx.media.MediaControllerCompat.PlaybackInfo.
   interface DeviceComponent {
 
     /** Adds a listener to receive device events. */
@@ -418,8 +422,13 @@ public interface Player {
   }
 
   /**
-   * Listener of changes in player state. All methods have no-op default implementations to allow
-   * selective overrides.
+   * Listener of changes in player state.
+   *
+   * <p>All methods have no-op default implementations to allow selective overrides.
+   *
+   * <p>Listeners can choose to implement individual events (e.g. {@link
+   * #onIsPlayingChanged(boolean)}) or {@link #onEvents(Player, Events)}, which is called after one
+   * or more events occurred together.
    */
   interface EventListener {
 
@@ -430,6 +439,9 @@ public interface Player {
      * occurred. For example, the current period index may have changed as a result of periods being
      * added or removed from the timeline. This will <em>not</em> be reported via a separate call to
      * {@link #onPositionDiscontinuity(int)}.
+     *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
      *
      * @param timeline The latest timeline. Never null, but may be empty.
      * @param reason The {@link TimelineChangeReason} responsible for this timeline change.
@@ -467,7 +479,26 @@ public interface Player {
         Timeline timeline, @Nullable Object manifest, @TimelineChangeReason int reason) {}
 
     /**
+     * Called when playback transitions to a media item or starts repeating a media item according
+     * to the current {@link #getRepeatMode() repeat mode}.
+     *
+     * <p>Note that this callback is also called when the playlist becomes non-empty or empty as a
+     * consequence of a playlist change.
+     *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
+     *
+     * @param mediaItem The {@link MediaItem}. May be null if the playlist becomes empty.
+     * @param reason The reason for the transition.
+     */
+    default void onMediaItemTransition(
+        @Nullable MediaItem mediaItem, @MediaItemTransitionReason int reason) {}
+
+    /**
      * Called when the available or selected tracks change.
+     *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
      *
      * @param trackGroups The available tracks. Never null, but may be of length zero.
      * @param trackSelections The track selections for each renderer. Never null and always of
@@ -477,7 +508,29 @@ public interface Player {
         TrackGroupArray trackGroups, TrackSelectionArray trackSelections) {}
 
     /**
+     * Called when the static metadata changes.
+     *
+     * <p>The provided {@code metadataList} is an immutable list of {@link Metadata} instances,
+     * where the elements correspond to the {@link #getCurrentTrackSelections() current track
+     * selections}, or an empty list if there are no track selections or the selected tracks contain
+     * no static metadata.
+     *
+     * <p>The metadata is considered static in the sense that it comes from the tracks' declared
+     * Formats, rather than being timed (or dynamic) metadata, which is represented within a
+     * metadata track.
+     *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
+     *
+     * @param metadataList The static metadata.
+     */
+    default void onStaticMetadataChanged(List<Metadata> metadataList) {}
+
+    /**
      * Called when the player starts or stops loading the source.
+     *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
      *
      * @param isLoading Whether the source is currently being loaded.
      */
@@ -500,12 +553,18 @@ public interface Player {
     /**
      * Called when the value returned from {@link #getPlaybackState()} changes.
      *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
+     *
      * @param state The new playback {@link State state}.
      */
     default void onPlaybackStateChanged(@State int state) {}
 
     /**
      * Called when the value returned from {@link #getPlayWhenReady()} changes.
+     *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
      *
      * @param playWhenReady Whether playback will proceed when ready.
      * @param reason The {@link PlayWhenReadyChangeReason reason} for the change.
@@ -516,6 +575,9 @@ public interface Player {
     /**
      * Called when the value returned from {@link #getPlaybackSuppressionReason()} changes.
      *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
+     *
      * @param playbackSuppressionReason The current {@link PlaybackSuppressionReason}.
      */
     default void onPlaybackSuppressionReasonChanged(
@@ -524,6 +586,9 @@ public interface Player {
     /**
      * Called when the value of {@link #isPlaying()} changes.
      *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
+     *
      * @param isPlaying Whether the player is playing.
      */
     default void onIsPlayingChanged(boolean isPlaying) {}
@@ -531,12 +596,18 @@ public interface Player {
     /**
      * Called when the value of {@link #getRepeatMode()} changes.
      *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
+     *
      * @param repeatMode The {@link RepeatMode} used for playback.
      */
     default void onRepeatModeChanged(@RepeatMode int repeatMode) {}
 
     /**
      * Called when the value of {@link #getShuffleModeEnabled()} changes.
+     *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
      *
      * @param shuffleModeEnabled Whether shuffling of windows is enabled.
      */
@@ -546,6 +617,9 @@ public interface Player {
      * Called when an error occurs. The playback state will transition to {@link #STATE_IDLE}
      * immediately after this method is called. The player instance can still be used, and {@link
      * #release()} must still be called on the player should it no longer be required.
+     *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
      *
      * @param error The error.
      */
@@ -561,32 +635,77 @@ public interface Player {
      * <p>When a position discontinuity occurs as a result of a change to the timeline this method
      * is <em>not</em> called. {@link #onTimelineChanged(Timeline, int)} is called in this case.
      *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
+     *
      * @param reason The {@link DiscontinuityReason} responsible for the discontinuity.
      */
     default void onPositionDiscontinuity(@DiscontinuityReason int reason) {}
 
     /**
-     * @deprecated Use {@link #onPlaybackSpeedChanged(float)} and {@link
-     *     AudioListener#onSkipSilenceEnabledChanged(boolean)} instead.
+     * Called when the current playback parameters change. The playback parameters may change due to
+     * a call to {@link #setPlaybackParameters(PlaybackParameters)}, or the player itself may change
+     * them (for example, if audio playback switches to passthrough or offload mode, where speed
+     * adjustment is no longer possible).
+     *
+     * <p>{@link #onEvents(Player, Events)} will also be called to report this event along with
+     * other events that happen in the same {@link Looper} message queue iteration.
+     *
+     * @param playbackParameters The playback parameters.
      */
-    @SuppressWarnings("deprecation")
-    @Deprecated
     default void onPlaybackParametersChanged(PlaybackParameters playbackParameters) {}
 
     /**
-     * Called when the current playback speed changes. The normal playback speed is 1. The speed may
-     * change due to a call to {@link #setPlaybackSpeed(float)}, or the player itself may change it
-     * (for example, if audio playback switches to passthrough mode, where speed adjustment is no
-     * longer possible).
+     * @deprecated Seeks are processed without delay. Listen to {@link
+     *     #onPositionDiscontinuity(int)} with reason {@link #DISCONTINUITY_REASON_SEEK} instead.
      */
-    default void onPlaybackSpeedChanged(float playbackSpeed) {}
+    @Deprecated
+    default void onSeekProcessed() {}
 
     /**
-     * Called when all pending seek requests have been processed by the player. This is guaranteed
-     * to happen after any necessary changes to the player state were reported to {@link
-     * #onPlaybackStateChanged(int)}.
+     * Called when the player has started or stopped offload scheduling after a call to {@link
+     * ExoPlayer#experimentalSetOffloadSchedulingEnabled(boolean)}.
+     *
+     * <p>This method is experimental, and will be renamed or removed in a future release.
      */
-    default void onSeekProcessed() {}
+    default void onExperimentalOffloadSchedulingEnabledChanged(boolean offloadSchedulingEnabled) {}
+
+    /**
+     * Called when the player has started or finished sleeping for offload.
+     *
+     * <p>This method is experimental, and will be renamed or removed in a future release.
+     */
+    default void onExperimentalSleepingForOffloadChanged(boolean sleepingForOffload) {}
+
+    /**
+     * Called when one or more player states changed.
+     *
+     * <p>State changes and events that happen within one {@link Looper} message queue iteration are
+     * reported together and only after all individual callbacks were triggered.
+     *
+     * <p>Listeners should prefer this method over individual callbacks in the following cases:
+     *
+     * <ul>
+     *   <li>They intend to trigger the same logic for multiple events (e.g. when updating a UI for
+     *       both {@link #onPlaybackStateChanged(int)} and {@link #onPlayWhenReadyChanged(boolean,
+     *       int)}).
+     *   <li>They need access to the {@link Player} object to trigger further events (e.g. to call
+     *       {@link Player#seekTo(long)} after a {@link #onMediaItemTransition(MediaItem, int)}).
+     *   <li>They intend to use multiple state values together or in combination with {@link Player}
+     *       getter methods. For example using {@link #getCurrentWindowIndex()} with the {@code
+     *       timeline} provided in {@link #onTimelineChanged(Timeline, int)} is only safe from
+     *       within this method.
+     *   <li>They are interested in events that logically happened together (e.g {@link
+     *       #onPlaybackStateChanged(int)} to {@link #STATE_BUFFERING} because of {@link
+     *       #onMediaItemTransition(MediaItem, int)}).
+     * </ul>
+     *
+     * @param player The {@link Player} whose state changed. Use the getters to obtain the latest
+     *     states.
+     * @param events The {@link Events} that happened in this iteration, indicating which player
+     *     states changed.
+     */
+    default void onEvents(Player player, Events events) {}
   }
 
   /**
@@ -620,6 +739,49 @@ public interface Player {
     @Deprecated
     public void onTimelineChanged(Timeline timeline, @Nullable Object manifest) {
       // Do nothing.
+    }
+  }
+
+  /** A set of {@link EventFlags}. */
+  final class Events extends MutableFlags {
+    /**
+     * Returns whether the given event occurred.
+     *
+     * @param event The {@link EventFlags event}.
+     * @return Whether the event occurred.
+     */
+    @Override
+    public boolean contains(@EventFlags int event) {
+      // Overridden to add IntDef compiler enforcement and new JavaDoc.
+      return super.contains(event);
+    }
+
+    /**
+     * Returns whether any of the given events occurred.
+     *
+     * @param events The {@link EventFlags events}.
+     * @return Whether any of the events occurred.
+     */
+    @Override
+    public boolean containsAny(@EventFlags int... events) {
+      // Overridden to add IntDef compiler enforcement and new JavaDoc.
+      return super.containsAny(events);
+    }
+
+    /**
+     * Returns the {@link EventFlags event} at the given index.
+     *
+     * <p>Although index-based access is possible, it doesn't imply a particular order of these
+     * events.
+     *
+     * @param index The index. Must be between 0 (inclusive) and {@link #size()} (exclusive).
+     * @return The {@link EventFlags event} at the given index.
+     */
+    @Override
+    @EventFlags
+    public int get(int index) {
+      // Overridden to add IntDef compiler enforcement and new JavaDoc.
+      return super.get(index);
     }
   }
 
@@ -705,17 +867,23 @@ public interface Player {
   @IntDef({REPEAT_MODE_OFF, REPEAT_MODE_ONE, REPEAT_MODE_ALL})
   @interface RepeatMode {}
   /**
-   * Normal playback without repetition.
+   * Normal playback without repetition. "Previous" and "Next" actions move to the previous and next
+   * windows respectively, and do nothing when there is no previous or next window to move to.
    */
-  int REPEAT_MODE_OFF = 0;
+  int REPEAT_MODE_OFF = C.REPEAT_MODE_OFF;
   /**
-   * "Repeat One" mode to repeat the currently playing window infinitely.
+   * Repeats the currently playing window infinitely during ongoing playback. "Previous" and "Next"
+   * actions behave as they do in {@link #REPEAT_MODE_OFF}, moving to the previous and next windows
+   * respectively, and doing nothing when there is no previous or next window to move to.
    */
-  int REPEAT_MODE_ONE = 1;
+  int REPEAT_MODE_ONE = C.REPEAT_MODE_ONE;
   /**
-   * "Repeat All" mode to repeat the entire timeline infinitely.
+   * Repeats the entire timeline infinitely. "Previous" and "Next" actions behave as they do in
+   * {@link #REPEAT_MODE_OFF}, but with looping at the ends so that "Previous" when playing the
+   * first window will move to the last window, and "Next" when playing the last window will move to
+   * the first window.
    */
-  int REPEAT_MODE_ALL = 2;
+  int REPEAT_MODE_ALL = C.REPEAT_MODE_ALL;
 
   /**
    * Reasons for position discontinuities. One of {@link #DISCONTINUITY_REASON_PERIOD_TRANSITION},
@@ -762,8 +930,85 @@ public interface Player {
   /** Timeline changed as a result of a dynamic update introduced by the played media. */
   int TIMELINE_CHANGE_REASON_SOURCE_UPDATE = 1;
 
-  /** The default playback speed. */
-  float DEFAULT_PLAYBACK_SPEED = 1.0f;
+  /**
+   * Reasons for media item transitions. One of {@link #MEDIA_ITEM_TRANSITION_REASON_REPEAT}, {@link
+   * #MEDIA_ITEM_TRANSITION_REASON_AUTO}, {@link #MEDIA_ITEM_TRANSITION_REASON_SEEK} or {@link
+   * #MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED}.
+   */
+  @Documented
+  @Retention(RetentionPolicy.SOURCE)
+  @IntDef({
+    MEDIA_ITEM_TRANSITION_REASON_REPEAT,
+    MEDIA_ITEM_TRANSITION_REASON_AUTO,
+    MEDIA_ITEM_TRANSITION_REASON_SEEK,
+    MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED
+  })
+  @interface MediaItemTransitionReason {}
+  /** The media item has been repeated. */
+  int MEDIA_ITEM_TRANSITION_REASON_REPEAT = 0;
+  /** Playback has automatically transitioned to the next media item. */
+  int MEDIA_ITEM_TRANSITION_REASON_AUTO = 1;
+  /** A seek to another media item has occurred. */
+  int MEDIA_ITEM_TRANSITION_REASON_SEEK = 2;
+  /**
+   * The current media item has changed because of a change in the playlist. This can either be if
+   * the media item previously being played has been removed, or when the playlist becomes non-empty
+   * after being empty.
+   */
+  int MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED = 3;
+
+  /**
+   * Events that can be reported via {@link EventListener#onEvents(Player, Events)}.
+   *
+   * <p>One of the {@link Player}{@code .EVENT_*} flags.
+   */
+  @Documented
+  @Retention(RetentionPolicy.SOURCE)
+  @IntDef({
+    EVENT_TIMELINE_CHANGED,
+    EVENT_MEDIA_ITEM_TRANSITION,
+    EVENT_TRACKS_CHANGED,
+    EVENT_STATIC_METADATA_CHANGED,
+    EVENT_IS_LOADING_CHANGED,
+    EVENT_PLAYBACK_STATE_CHANGED,
+    EVENT_PLAY_WHEN_READY_CHANGED,
+    EVENT_PLAYBACK_SUPPRESSION_REASON_CHANGED,
+    EVENT_IS_PLAYING_CHANGED,
+    EVENT_REPEAT_MODE_CHANGED,
+    EVENT_SHUFFLE_MODE_ENABLED_CHANGED,
+    EVENT_PLAYER_ERROR,
+    EVENT_POSITION_DISCONTINUITY,
+    EVENT_PLAYBACK_PARAMETERS_CHANGED
+  })
+  @interface EventFlags {}
+  /** {@link #getCurrentTimeline()} changed. */
+  int EVENT_TIMELINE_CHANGED = 0;
+  /** {@link #getCurrentMediaItem()} changed or the player started repeating the current item. */
+  int EVENT_MEDIA_ITEM_TRANSITION = 1;
+  /** {@link #getCurrentTrackGroups()} or {@link #getCurrentTrackSelections()} changed. */
+  int EVENT_TRACKS_CHANGED = 2;
+  /** {@link #getCurrentStaticMetadata()} changed. */
+  int EVENT_STATIC_METADATA_CHANGED = 3;
+  /** {@link #isLoading()} ()} changed. */
+  int EVENT_IS_LOADING_CHANGED = 4;
+  /** {@link #getPlaybackState()} changed. */
+  int EVENT_PLAYBACK_STATE_CHANGED = 5;
+  /** {@link #getPlayWhenReady()} changed. */
+  int EVENT_PLAY_WHEN_READY_CHANGED = 6;
+  /** {@link #getPlaybackSuppressionReason()} changed. */
+  int EVENT_PLAYBACK_SUPPRESSION_REASON_CHANGED = 7;
+  /** {@link #isPlaying()} changed. */
+  int EVENT_IS_PLAYING_CHANGED = 8;
+  /** {@link #getRepeatMode()} changed. */
+  int EVENT_REPEAT_MODE_CHANGED = 9;
+  /** {@link #getShuffleModeEnabled()} changed. */
+  int EVENT_SHUFFLE_MODE_ENABLED_CHANGED = 10;
+  /** {@link #getPlayerError()} changed. */
+  int EVENT_PLAYER_ERROR = 11;
+  /** A position discontinuity occurred. See {@link EventListener#onPositionDiscontinuity(int)}. */
+  int EVENT_POSITION_DISCONTINUITY = 12;
+  /** {@link #getPlaybackParameters()} changed. */
+  int EVENT_PLAYBACK_PARAMETERS_CHANGED = 13;
 
   /** Returns the component of this player for audio output, or null if audio is not supported. */
   @Nullable
@@ -837,6 +1082,8 @@ public interface Player {
    *     C#TIME_UNSET} is passed, the default position of the given window is used. In any case, if
    *     {@code startWindowIndex} is set to {@link C#INDEX_UNSET}, this parameter is ignored and the
    *     position is not reset at all.
+   * @throws IllegalSeekPositionException If the provided {@code windowIndex} is not within the
+   *     bounds of the list of media items.
    */
   void setMediaItems(List<MediaItem> mediaItems, int startWindowIndex, long startPositionMs);
 
@@ -1060,6 +1307,8 @@ public interface Player {
    *
    * @param windowIndex The index of the window whose associated default position should be seeked
    *     to.
+   * @throws IllegalSeekPositionException If the player has a non-empty timeline and the provided
+   *     {@code windowIndex} is not within the bounds of the current timeline.
    */
   void seekToDefaultPosition(int windowIndex);
 
@@ -1085,62 +1334,62 @@ public interface Player {
   /**
    * Returns whether a previous window exists, which may depend on the current repeat mode and
    * whether shuffle mode is enabled.
+   *
+   * <p>Note: When the repeat mode is {@link #REPEAT_MODE_ONE}, this method behaves the same as when
+   * the current repeat mode is {@link #REPEAT_MODE_OFF}. See {@link #REPEAT_MODE_ONE} for more
+   * details.
    */
   boolean hasPrevious();
 
   /**
-   * Seeks to the default position of the previous window in the timeline, which may depend on the
-   * current repeat mode and whether shuffle mode is enabled. Does nothing if {@link #hasPrevious()}
-   * is {@code false}.
+   * Seeks to the default position of the previous window, which may depend on the current repeat
+   * mode and whether shuffle mode is enabled. Does nothing if {@link #hasPrevious()} is {@code
+   * false}.
+   *
+   * <p>Note: When the repeat mode is {@link #REPEAT_MODE_ONE}, this method behaves the same as when
+   * the current repeat mode is {@link #REPEAT_MODE_OFF}. See {@link #REPEAT_MODE_ONE} for more
+   * details.
    */
   void previous();
 
   /**
    * Returns whether a next window exists, which may depend on the current repeat mode and whether
    * shuffle mode is enabled.
+   *
+   * <p>Note: When the repeat mode is {@link #REPEAT_MODE_ONE}, this method behaves the same as when
+   * the current repeat mode is {@link #REPEAT_MODE_OFF}. See {@link #REPEAT_MODE_ONE} for more
+   * details.
    */
   boolean hasNext();
 
   /**
-   * Seeks to the default position of the next window in the timeline, which may depend on the
-   * current repeat mode and whether shuffle mode is enabled. Does nothing if {@link #hasNext()} is
-   * {@code false}.
+   * Seeks to the default position of the next window, which may depend on the current repeat mode
+   * and whether shuffle mode is enabled. Does nothing if {@link #hasNext()} is {@code false}.
+   *
+   * <p>Note: When the repeat mode is {@link #REPEAT_MODE_ONE}, this method behaves the same as when
+   * the current repeat mode is {@link #REPEAT_MODE_OFF}. See {@link #REPEAT_MODE_ONE} for more
+   * details.
    */
   void next();
 
   /**
-   * @deprecated Use {@link #setPlaybackSpeed(float)} or {@link
-   *     AudioComponent#setSkipSilenceEnabled(boolean)} instead.
+   * Attempts to set the playback parameters. Passing {@code null} sets the parameters to the
+   * default, {@link PlaybackParameters#DEFAULT}, which means there is no speed or pitch adjustment.
+   *
+   * <p>Playback parameters changes may cause the player to buffer. {@link
+   * EventListener#onPlaybackParametersChanged(PlaybackParameters)} will be called whenever the
+   * currently active playback parameters change.
+   *
+   * @param playbackParameters The playback parameters, or {@code null} to use the defaults.
    */
-  @SuppressWarnings("deprecation")
-  @Deprecated
   void setPlaybackParameters(@Nullable PlaybackParameters playbackParameters);
 
   /**
-   * @deprecated Use {@link #getPlaybackSpeed()} or {@link AudioComponent#getSkipSilenceEnabled()}
-   *     instead.
+   * Returns the currently active playback parameters.
+   *
+   * @see EventListener#onPlaybackParametersChanged(PlaybackParameters)
    */
-  @SuppressWarnings("deprecation")
-  @Deprecated
   PlaybackParameters getPlaybackParameters();
-
-  /**
-   * Attempts to set the playback speed.
-   *
-   * <p>Playback speed changes may cause the player to buffer. {@link
-   * EventListener#onPlaybackSpeedChanged(float)} will be called whenever the currently active
-   * playback speed change.
-   *
-   * @param playbackSpeed The playback speed.
-   */
-  void setPlaybackSpeed(float playbackSpeed);
-
-  /**
-   * Returns the currently active playback speed.
-   *
-   * @see EventListener#onPlaybackSpeedChanged(float)
-   */
-  float getPlaybackSpeed();
 
   /**
    * Stops playback without resetting the player. Use {@link #pause()} rather than this method if
@@ -1150,19 +1399,21 @@ public interface Player {
    * player instance can still be used, and {@link #release()} must still be called on the player if
    * it's no longer required.
    *
-   * <p>Calling this method does not reset the playback position.
+   * <p>Calling this method does not clear the playlist, reset the playback position or the playback
+   * error.
    */
   void stop();
 
   /**
-   * Stops playback and optionally resets the player. Use {@link #pause()} rather than this method
-   * if the intention is to pause playback.
+   * Stops playback and optionally clears the playlist and resets the position and playback error.
+   * Use {@link #pause()} rather than this method if the intention is to pause playback.
    *
    * <p>Calling this method will cause the playback state to transition to {@link #STATE_IDLE}. The
    * player instance can still be used, and {@link #release()} must still be called on the player if
    * it's no longer required.
    *
-   * @param reset Whether the player should be reset.
+   * @param reset Whether the playlist should be cleared and whether the playback position and
+   *     playback error should be reset.
    */
   void stop(boolean reset);
 
@@ -1187,19 +1438,35 @@ public interface Player {
   int getRendererType(int index);
 
   /**
-   * Returns the available track groups.
+   * Returns the track selector that this player uses, or null if track selection is not supported.
    */
+  @Nullable
+  TrackSelectorInterface getTrackSelector();
+
+  /** Returns the available track groups. */
   TrackGroupArray getCurrentTrackGroups();
 
-  /**
-   * Returns the current track selections for each renderer.
-   */
+  /** Returns the current track selections for each renderer. */
   TrackSelectionArray getCurrentTrackSelections();
+
+  /**
+   * Returns the current static metadata for the track selections.
+   *
+   * <p>The returned {@code metadataList} is an immutable list of {@link Metadata} instances, where
+   * the elements correspond to the {@link #getCurrentTrackSelections() current track selections},
+   * or an empty list if there are no track selections or the selected tracks contain no static
+   * metadata.
+   *
+   * <p>This metadata is considered static in that it comes from the tracks' declared Formats,
+   * rather than being timed (or dynamic) metadata, which is represented within a metadata track.
+   */
+  List<Metadata> getCurrentStaticMetadata();
 
   /**
    * Returns the current manifest. The type depends on the type of media being played. May be null.
    */
-  @Nullable Object getCurrentManifest();
+  @Nullable
+  Object getCurrentManifest();
 
   /**
    * Returns the current {@link Timeline}. Never null, but may be empty.
@@ -1212,29 +1479,54 @@ public interface Player {
   int getCurrentPeriodIndex();
 
   /**
-   * Returns the index of the window currently being played.
+   * Returns the index of the current {@link Timeline.Window window} in the {@link
+   * #getCurrentTimeline() timeline}, or the prospective window index if the {@link
+   * #getCurrentTimeline() current timeline} is empty.
    */
   int getCurrentWindowIndex();
 
   /**
-   * Returns the index of the next timeline window to be played, which may depend on the current
-   * repeat mode and whether shuffle mode is enabled. Returns {@link C#INDEX_UNSET} if the window
-   * currently being played is the last window.
+   * Returns the index of the window that will be played if {@link #next()} is called, which may
+   * depend on the current repeat mode and whether shuffle mode is enabled. Returns {@link
+   * C#INDEX_UNSET} if {@link #hasNext()} is {@code false}.
+   *
+   * <p>Note: When the repeat mode is {@link #REPEAT_MODE_ONE}, this method behaves the same as when
+   * the current repeat mode is {@link #REPEAT_MODE_OFF}. See {@link #REPEAT_MODE_ONE} for more
+   * details.
    */
   int getNextWindowIndex();
 
   /**
-   * Returns the index of the previous timeline window to be played, which may depend on the current
-   * repeat mode and whether shuffle mode is enabled. Returns {@link C#INDEX_UNSET} if the window
-   * currently being played is the first window.
+   * Returns the index of the window that will be played if {@link #previous()} is called, which may
+   * depend on the current repeat mode and whether shuffle mode is enabled. Returns {@link
+   * C#INDEX_UNSET} if {@link #hasPrevious()} is {@code false}.
+   *
+   * <p>Note: When the repeat mode is {@link #REPEAT_MODE_ONE}, this method behaves the same as when
+   * the current repeat mode is {@link #REPEAT_MODE_OFF}. See {@link #REPEAT_MODE_ONE} for more
+   * details.
    */
   int getPreviousWindowIndex();
 
   /**
-   * Returns the tag of the currently playing window in the timeline. May be null if no tag is set
-   * or the timeline is not yet available.
+   * @deprecated Use {@link #getCurrentMediaItem()} and {@link MediaItem.PlaybackProperties#tag}
+   *     instead.
    */
-  @Nullable Object getCurrentTag();
+  @Deprecated
+  @Nullable
+  Object getCurrentTag();
+
+  /**
+   * Returns the media item of the current window in the timeline. May be null if the timeline is
+   * empty.
+   */
+  @Nullable
+  MediaItem getCurrentMediaItem();
+
+  /** Returns the number of {@link MediaItem media items} in the playlist. */
+  int getMediaItemCount();
+
+  /** Returns the {@link MediaItem} at the given index. */
+  MediaItem getMediaItemAt(int index);
 
   /**
    * Returns the duration of the current content window or ad in milliseconds, or {@link
@@ -1242,7 +1534,11 @@ public interface Player {
    */
   long getDuration();
 
-  /** Returns the playback position in the current content window or ad, in milliseconds. */
+  /**
+   * Returns the playback position in the current content window or ad, in milliseconds, or the
+   * prospective position in milliseconds if the {@link #getCurrentTimeline() current timeline} is
+   * empty.
+   */
   long getCurrentPosition();
 
   /**
@@ -1274,7 +1570,7 @@ public interface Player {
   /**
    * Returns whether the current window is live, or {@code false} if the {@link Timeline} is empty.
    *
-   * @see Timeline.Window#isLive
+   * @see Timeline.Window#isLive()
    */
   boolean isCurrentWindowLive();
 

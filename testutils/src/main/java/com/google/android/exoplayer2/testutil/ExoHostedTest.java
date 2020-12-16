@@ -15,6 +15,7 @@
  */
 package com.google.android.exoplayer2.testutil;
 
+import static com.google.android.exoplayer2.util.Assertions.checkNotNull;
 import static com.google.common.truth.Truth.assertWithMessage;
 
 import android.os.ConditionVariable;
@@ -22,7 +23,6 @@ import android.os.SystemClock;
 import android.view.Surface;
 import android.widget.FrameLayout;
 import androidx.annotation.Nullable;
-import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.DefaultRenderersFactory;
 import com.google.android.exoplayer2.ExoPlaybackException;
 import com.google.android.exoplayer2.ExoPlayer;
@@ -39,7 +39,6 @@ import com.google.android.exoplayer2.trackselection.MappingTrackSelector;
 import com.google.android.exoplayer2.util.Clock;
 import com.google.android.exoplayer2.util.EventLogger;
 import com.google.android.exoplayer2.util.HandlerWrapper;
-import com.google.android.exoplayer2.util.Log;
 import com.google.android.exoplayer2.util.Util;
 import org.checkerframework.checker.nullness.qual.EnsuresNonNullIf;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
@@ -54,7 +53,7 @@ public abstract class ExoHostedTest implements AnalyticsListener, HostedTest {
     DefaultAudioSink.failOnSpuriousAudioTimestamp = true;
   }
 
-  public static final long MAX_PLAYING_TIME_DISCREPANCY_MS = 2000;
+  public static final long MAX_PLAYING_TIME_DISCREPANCY_MS = 5000;
   public static final long EXPECTED_PLAYING_TIME_MEDIA_DURATION_MS = -2;
   public static final long EXPECTED_PLAYING_TIME_UNSET = -1;
 
@@ -72,9 +71,7 @@ public abstract class ExoHostedTest implements AnalyticsListener, HostedTest {
   private @MonotonicNonNull DefaultTrackSelector trackSelector;
   private @MonotonicNonNull Surface surface;
   private @MonotonicNonNull ExoPlaybackException playerError;
-  private boolean playerWasPrepared;
 
-  private boolean playing;
   private long totalPlayingTimeMs;
   private long lastPlayingStartTimeMs;
   private long sourceDurationMs;
@@ -131,21 +128,19 @@ public abstract class ExoHostedTest implements AnalyticsListener, HostedTest {
     this.surface = surface;
     // Build the player.
     trackSelector = buildTrackSelector(host);
-    String userAgent = "ExoPlayerPlaybackTests";
     player = buildExoPlayer(host, surface, trackSelector);
     player.play();
     player.addAnalyticsListener(this);
     player.addAnalyticsListener(new EventLogger(trackSelector, tag));
     // Schedule any pending actions.
-    actionHandler = Clock.DEFAULT.createHandler(Util.getLooper(), /* callback= */ null);
+    actionHandler =
+        Clock.DEFAULT.createHandler(Util.getCurrentOrMainLooper(), /* callback= */ null);
     if (pendingSchedule != null) {
       pendingSchedule.start(player, trackSelector, surface, actionHandler, /* callback= */ null);
       pendingSchedule = null;
     }
-    DrmSessionManager drmSessionManager = buildDrmSessionManager(userAgent);
-    player.setMediaSource(
-        buildSource(
-            host, Util.getUserAgent(host, userAgent), drmSessionManager, overlayFrameLayout));
+    DrmSessionManager drmSessionManager = buildDrmSessionManager();
+    player.setMediaSource(buildSource(host, drmSessionManager, overlayFrameLayout));
     player.prepare();
   }
 
@@ -162,7 +157,7 @@ public abstract class ExoHostedTest implements AnalyticsListener, HostedTest {
   @Override
   public final void onFinished() {
     if (failOnPlayerError && playerError != null) {
-      throw new Error(playerError);
+      throw new RuntimeException(playerError);
     }
     logMetrics(audioDecoderCounters, videoDecoderCounters);
     if (expectedPlayingTimeMs != EXPECTED_PLAYING_TIME_UNSET) {
@@ -172,7 +167,7 @@ public abstract class ExoHostedTest implements AnalyticsListener, HostedTest {
       long minAllowedActualPlayingTimeMs = playingTimeToAssertMs - MAX_PLAYING_TIME_DISCREPANCY_MS;
       long maxAllowedActualPlayingTimeMs = playingTimeToAssertMs + MAX_PLAYING_TIME_DISCREPANCY_MS;
       assertWithMessage(
-              "Total playing time: " + totalPlayingTimeMs + ". Expected: " + playingTimeToAssertMs)
+              "Total playing time: %sms. Expected: %sms", totalPlayingTimeMs, playingTimeToAssertMs)
           .that(
               minAllowedActualPlayingTimeMs <= totalPlayingTimeMs
                   && totalPlayingTimeMs <= maxAllowedActualPlayingTimeMs)
@@ -185,38 +180,34 @@ public abstract class ExoHostedTest implements AnalyticsListener, HostedTest {
   // AnalyticsListener
 
   @Override
-  public final void onPlayerStateChanged(
-      EventTime eventTime, boolean playWhenReady, @Player.State int playbackState) {
-    Log.d(tag, "state [" + playWhenReady + ", " + playbackState + "]");
-    playerWasPrepared |= playbackState != Player.STATE_IDLE;
-    if (playbackState == Player.STATE_ENDED
-        || (playbackState == Player.STATE_IDLE && playerWasPrepared)) {
-      stopTest();
+  public void onEvents(Player player, Events events) {
+    if (events.contains(EVENT_IS_PLAYING_CHANGED)) {
+      if (player.isPlaying()) {
+        lastPlayingStartTimeMs = SystemClock.elapsedRealtime();
+      } else {
+        totalPlayingTimeMs += SystemClock.elapsedRealtime() - lastPlayingStartTimeMs;
+      }
     }
-    boolean playing = playWhenReady && playbackState == Player.STATE_READY;
-    if (!this.playing && playing) {
-      lastPlayingStartTimeMs = SystemClock.elapsedRealtime();
-    } else if (this.playing && !playing) {
-      totalPlayingTimeMs += SystemClock.elapsedRealtime() - lastPlayingStartTimeMs;
+    if (events.contains(EVENT_PLAYER_ERROR)) {
+      playerError = checkNotNull(player.getPlayerError());
+      onPlayerErrorInternal(playerError);
     }
-    this.playing = playing;
+    if (events.contains(EVENT_PLAYBACK_STATE_CHANGED)) {
+      @Player.State int playbackState = player.getPlaybackState();
+      if (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE) {
+        stopTest();
+      }
+    }
   }
 
   @Override
-  public final void onPlayerError(EventTime eventTime, ExoPlaybackException error) {
-    playerWasPrepared = true;
-    playerError = error;
-    onPlayerErrorInternal(error);
+  public void onAudioDisabled(EventTime eventTime, DecoderCounters decoderCounters) {
+    audioDecoderCounters.merge(decoderCounters);
   }
 
   @Override
-  public void onDecoderDisabled(
-      EventTime eventTime, int trackType, DecoderCounters decoderCounters) {
-    if (trackType == C.TRACK_TYPE_AUDIO) {
-      audioDecoderCounters.merge(decoderCounters);
-    } else if (trackType == C.TRACK_TYPE_VIDEO) {
-      videoDecoderCounters.merge(decoderCounters);
-    }
+  public void onVideoDisabled(EventTime eventTime, DecoderCounters decoderCounters) {
+    videoDecoderCounters.merge(decoderCounters);
   }
 
   // Internal logic
@@ -234,7 +225,7 @@ public abstract class ExoHostedTest implements AnalyticsListener, HostedTest {
     return true;
   }
 
-  protected DrmSessionManager buildDrmSessionManager(String userAgent) {
+  protected DrmSessionManager buildDrmSessionManager() {
     // Do nothing. Interested subclasses may override.
     return DrmSessionManager.getDummyDrmSessionManager();
   }
@@ -258,7 +249,6 @@ public abstract class ExoHostedTest implements AnalyticsListener, HostedTest {
 
   protected abstract MediaSource buildSource(
       HostActivity host,
-      String userAgent,
       DrmSessionManager drmSessionManager,
       FrameLayout overlayFrameLayout);
 

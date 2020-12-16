@@ -15,6 +15,12 @@
  */
 package com.google.android.exoplayer2.video;
 
+import static com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.DISCARD_REASON_MAX_INPUT_SIZE_EXCEEDED;
+import static com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.DISCARD_REASON_VIDEO_MAX_RESOLUTION_EXCEEDED;
+import static com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.REUSE_RESULT_NO;
+import static java.lang.Math.max;
+import static java.lang.Math.min;
+
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
 import android.content.Context;
@@ -40,8 +46,12 @@ import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.FormatHolder;
 import com.google.android.exoplayer2.PlayerMessage.Target;
 import com.google.android.exoplayer2.RendererCapabilities;
+import com.google.android.exoplayer2.decoder.DecoderCounters;
 import com.google.android.exoplayer2.decoder.DecoderInputBuffer;
+import com.google.android.exoplayer2.decoder.DecoderReuseEvaluation;
+import com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.DecoderDiscardReasons;
 import com.google.android.exoplayer2.drm.DrmInitData;
+import com.google.android.exoplayer2.mediacodec.MediaCodecAdapter;
 import com.google.android.exoplayer2.mediacodec.MediaCodecDecoderException;
 import com.google.android.exoplayer2.mediacodec.MediaCodecInfo;
 import com.google.android.exoplayer2.mediacodec.MediaCodecRenderer;
@@ -69,7 +79,7 @@ import java.util.List;
  *   <li>Message with type {@link #MSG_SET_SURFACE} to set the output surface. The message payload
  *       should be the target {@link Surface}, or null.
  *   <li>Message with type {@link #MSG_SET_SCALING_MODE} to set the video scaling mode. The message
- *       payload should be one of the integer scaling modes in {@link VideoScalingMode}. Note that
+ *       payload should be one of the integer scaling modes in {@link C.VideoScalingMode}. Note that
  *       the scaling mode only applies if the {@link Surface} targeted by this renderer is owned by
  *       a {@link android.view.SurfaceView}.
  *   <li>Message with type {@link #MSG_SET_VIDEO_FRAME_METADATA_LISTENER} to set a listener for
@@ -112,9 +122,11 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   private boolean codecNeedsSetOutputSurfaceWorkaround;
   private boolean codecHandlesHdr10PlusOutOfBandMetadata;
 
-  private Surface surface;
-  private Surface dummySurface;
-  @VideoScalingMode private int scalingMode;
+  @Nullable private Surface surface;
+  private float surfaceFrameRate;
+  @Nullable private Surface dummySurface;
+  private boolean haveReportedFirstFrameRenderedForCurrentSurface;
+  @C.VideoScalingMode private int scalingMode;
   private boolean renderedFirstFrameAfterReset;
   private boolean mayRenderFirstFrameAfterEnableIfNotStarted;
   private boolean renderedFirstFrameAfterEnable;
@@ -124,13 +136,11 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   private int droppedFrames;
   private int consecutiveDroppedFrameCount;
   private int buffersInCodecCount;
-  private long lastRenderTimeUs;
+  private long lastBufferPresentationTimeUs;
+  private long lastRenderRealtimeUs;
   private long totalVideoFrameProcessingOffsetUs;
   private int videoFrameProcessingOffsetCount;
 
-  private int pendingRotationDegrees;
-  private float pendingPixelWidthHeightRatio;
-  @Nullable private MediaFormat currentMediaFormat;
   private int currentWidth;
   private int currentHeight;
   private int currentUnappliedRotationDegrees;
@@ -190,6 +200,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       int maxDroppedFramesToNotify) {
     this(
         context,
+        MediaCodecAdapter.Factory.DEFAULT,
         mediaCodecSelector,
         allowedJoiningTimeMs,
         /* enableDecoderFallback= */ false,
@@ -220,8 +231,47 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       @Nullable Handler eventHandler,
       @Nullable VideoRendererEventListener eventListener,
       int maxDroppedFramesToNotify) {
+    this(
+        context,
+        MediaCodecAdapter.Factory.DEFAULT,
+        mediaCodecSelector,
+        allowedJoiningTimeMs,
+        enableDecoderFallback,
+        eventHandler,
+        eventListener,
+        maxDroppedFramesToNotify);
+  }
+
+  /**
+   * Creates a new instance.
+   *
+   * @param context A context.
+   * @param codecAdapterFactory The {@link MediaCodecAdapter.Factory} used to create {@link
+   *     MediaCodecAdapter} instances.
+   * @param mediaCodecSelector A decoder selector.
+   * @param allowedJoiningTimeMs The maximum duration in milliseconds for which this video renderer
+   *     can attempt to seamlessly join an ongoing playback.
+   * @param enableDecoderFallback Whether to enable fallback to lower-priority decoders if decoder
+   *     initialization fails. This may result in using a decoder that is slower/less efficient than
+   *     the primary decoder.
+   * @param eventHandler A handler to use when delivering events to {@code eventListener}. May be
+   *     null if delivery of events is not required.
+   * @param eventListener A listener of events. May be null if delivery of events is not required.
+   * @param maxDroppedFramesToNotify The maximum number of frames that can be dropped between
+   *     invocations of {@link VideoRendererEventListener#onDroppedFrames(int, long)}.
+   */
+  public MediaCodecVideoRenderer(
+      Context context,
+      MediaCodecAdapter.Factory codecAdapterFactory,
+      MediaCodecSelector mediaCodecSelector,
+      long allowedJoiningTimeMs,
+      boolean enableDecoderFallback,
+      @Nullable Handler eventHandler,
+      @Nullable VideoRendererEventListener eventListener,
+      int maxDroppedFramesToNotify) {
     super(
         C.TRACK_TYPE_VIDEO,
+        codecAdapterFactory,
         mediaCodecSelector,
         enableDecoderFallback,
         /* assumedMinimumCodecOperatingRate= */ 30);
@@ -235,8 +285,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     currentWidth = Format.NO_VALUE;
     currentHeight = Format.NO_VALUE;
     currentPixelWidthHeightRatio = Format.NO_VALUE;
-    pendingPixelWidthHeightRatio = Format.NO_VALUE;
-    scalingMode = VIDEO_SCALING_MODE_DEFAULT;
+    scalingMode = C.VIDEO_SCALING_MODE_DEFAULT;
     clearReportedVideoSize();
   }
 
@@ -251,7 +300,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       throws DecoderQueryException {
     String mimeType = format.sampleMimeType;
     if (!MimeTypes.isVideo(mimeType)) {
-      return RendererCapabilities.create(FORMAT_UNSUPPORTED_TYPE);
+      return RendererCapabilities.create(C.FORMAT_UNSUPPORTED_TYPE);
     }
     @Nullable DrmInitData drmInitData = format.drmInitData;
     // Assume encrypted content requires secure decoders.
@@ -272,10 +321,10 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
               /* requiresTunnelingDecoder= */ false);
     }
     if (decoderInfos.isEmpty()) {
-      return RendererCapabilities.create(FORMAT_UNSUPPORTED_SUBTYPE);
+      return RendererCapabilities.create(C.FORMAT_UNSUPPORTED_SUBTYPE);
     }
     if (!supportsFormatDrm(format)) {
-      return RendererCapabilities.create(FORMAT_UNSUPPORTED_DRM);
+      return RendererCapabilities.create(C.FORMAT_UNSUPPORTED_DRM);
     }
     // Check capabilities for the first decoder in the list, which takes priority.
     MediaCodecInfo decoderInfo = decoderInfos.get(0);
@@ -301,8 +350,8 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
         }
       }
     }
-    @FormatSupport
-    int formatSupport = isFormatSupported ? FORMAT_HANDLED : FORMAT_EXCEEDS_CAPABILITIES;
+    @C.FormatSupport
+    int formatSupport = isFormatSupported ? C.FORMAT_HANDLED : C.FORMAT_EXCEEDS_CAPABILITIES;
     return RendererCapabilities.create(formatSupport, adaptiveSupport, tunnelingSupport);
   }
 
@@ -359,7 +408,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       releaseCodec();
     }
     eventDispatcher.enabled(decoderCounters);
-    frameReleaseTimeHelper.enable();
+    frameReleaseTimeHelper.onEnabled();
     mayRenderFirstFrameAfterEnableIfNotStarted = mayRenderStartOfStream;
     renderedFirstFrameAfterEnable = false;
   }
@@ -368,6 +417,8 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   protected void onPositionReset(long positionUs, boolean joining) throws ExoPlaybackException {
     super.onPositionReset(positionUs, joining);
     clearRenderedFirstFrame();
+    frameReleaseTimeHelper.onPositionReset();
+    lastBufferPresentationTimeUs = C.TIME_UNSET;
     initialPositionUs = C.TIME_UNSET;
     consecutiveDroppedFrameCount = 0;
     if (joining) {
@@ -405,9 +456,11 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     super.onStarted();
     droppedFrames = 0;
     droppedFrameAccumulationStartTimeMs = SystemClock.elapsedRealtime();
-    lastRenderTimeUs = SystemClock.elapsedRealtime() * 1000;
+    lastRenderRealtimeUs = SystemClock.elapsedRealtime() * 1000;
     totalVideoFrameProcessingOffsetUs = 0;
     videoFrameProcessingOffsetCount = 0;
+    frameReleaseTimeHelper.onStarted();
+    updateSurfaceFrameRate(/* isNewSurface= */ false);
   }
 
   @Override
@@ -415,15 +468,16 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     joiningDeadlineMs = C.TIME_UNSET;
     maybeNotifyDroppedFrames();
     maybeNotifyVideoFrameProcessingOffset();
+    clearSurfaceFrameRate();
     super.onStopped();
   }
 
   @Override
   protected void onDisabled() {
-    currentMediaFormat = null;
     clearReportedVideoSize();
     clearRenderedFirstFrame();
-    frameReleaseTimeHelper.disable();
+    haveReportedFirstFrameRenderedForCurrentSurface = false;
+    frameReleaseTimeHelper.onDisabled();
     tunnelingOnFrameRenderedListener = null;
     try {
       super.onDisabled();
@@ -453,7 +507,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       setSurface((Surface) message);
     } else if (messageType == MSG_SET_SCALING_MODE) {
       scalingMode = (Integer) message;
-      MediaCodec codec = getCodec();
+      @Nullable MediaCodecAdapter codec = getCodec();
       if (codec != null) {
         codec.setVideoScalingMode(scalingMode);
       }
@@ -479,15 +533,19 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     }
     // We only need to update the codec if the surface has changed.
     if (this.surface != surface) {
+      clearSurfaceFrameRate();
       this.surface = surface;
+      haveReportedFirstFrameRenderedForCurrentSurface = false;
+      updateSurfaceFrameRate(/* isNewSurface= */ true);
+
       @State int state = getState();
-      MediaCodec codec = getCodec();
+      @Nullable MediaCodecAdapter codec = getCodec();
       if (codec != null) {
         if (Util.SDK_INT >= 23 && surface != null && !codecNeedsSetOutputSurfaceWorkaround) {
           setOutputSurfaceV23(codec, surface);
         } else {
           releaseCodec();
-          maybeInitCodec();
+          maybeInitCodecOrBypass();
         }
       }
       if (surface != null && surface != dummySurface) {
@@ -525,7 +583,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   @Override
   protected void configureCodec(
       MediaCodecInfo codecInfo,
-      MediaCodec codec,
+      MediaCodecAdapter codec,
       Format format,
       @Nullable MediaCrypto crypto,
       float codecOperatingRate) {
@@ -555,18 +613,24 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   }
 
   @Override
-  protected @KeepCodecResult int canKeepCodec(
-      MediaCodec codec, MediaCodecInfo codecInfo, Format oldFormat, Format newFormat) {
-    if (codecInfo.isSeamlessAdaptationSupported(
-            oldFormat, newFormat, /* isNewFormatComplete= */ true)
-        && newFormat.width <= codecMaxValues.width
-        && newFormat.height <= codecMaxValues.height
-        && getMaxInputSize(codecInfo, newFormat) <= codecMaxValues.inputSize) {
-      return oldFormat.initializationDataEquals(newFormat)
-          ? KEEP_CODEC_RESULT_YES_WITHOUT_RECONFIGURATION
-          : KEEP_CODEC_RESULT_YES_WITH_RECONFIGURATION;
+  protected DecoderReuseEvaluation canReuseCodec(
+      MediaCodecInfo codecInfo, Format oldFormat, Format newFormat) {
+    DecoderReuseEvaluation evaluation = codecInfo.canReuseCodec(oldFormat, newFormat);
+
+    @DecoderDiscardReasons int discardReasons = evaluation.discardReasons;
+    if (newFormat.width > codecMaxValues.width || newFormat.height > codecMaxValues.height) {
+      discardReasons |= DISCARD_REASON_VIDEO_MAX_RESOLUTION_EXCEEDED;
     }
-    return KEEP_CODEC_RESULT_NO;
+    if (getMaxInputSize(codecInfo, newFormat) > codecMaxValues.inputSize) {
+      discardReasons |= DISCARD_REASON_MAX_INPUT_SIZE_EXCEEDED;
+    }
+
+    return new DecoderReuseEvaluation(
+        codecInfo.name,
+        oldFormat,
+        newFormat,
+        discardReasons != 0 ? REUSE_RESULT_NO : evaluation.result,
+        discardReasons);
   }
 
   @CallSuper
@@ -577,18 +641,25 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   }
 
   @Override
+  public void setPlaybackSpeed(float playbackSpeed) throws ExoPlaybackException {
+    super.setPlaybackSpeed(playbackSpeed);
+    frameReleaseTimeHelper.onPlaybackSpeed(playbackSpeed);
+    updateSurfaceFrameRate(/* isNewSurface= */ false);
+  }
+
+  @Override
   protected float getCodecOperatingRateV23(
-      float operatingRate, Format format, Format[] streamFormats) {
+      float playbackSpeed, Format format, Format[] streamFormats) {
     // Use the highest known stream frame-rate up front, to avoid having to reconfigure the codec
     // should an adaptive switch to that stream occur.
     float maxFrameRate = -1;
     for (Format streamFormat : streamFormats) {
       float streamFrameRate = streamFormat.frameRate;
       if (streamFrameRate != Format.NO_VALUE) {
-        maxFrameRate = Math.max(maxFrameRate, streamFrameRate);
+        maxFrameRate = max(maxFrameRate, streamFrameRate);
       }
     }
-    return maxFrameRate == -1 ? CODEC_OPERATING_RATE_UNSET : (maxFrameRate * operatingRate);
+    return maxFrameRate == -1 ? CODEC_OPERATING_RATE_UNSET : (maxFrameRate * playbackSpeed);
   }
 
   @Override
@@ -601,22 +672,30 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   }
 
   @Override
-  protected void onInputFormatChanged(FormatHolder formatHolder) throws ExoPlaybackException {
-    super.onInputFormatChanged(formatHolder);
-    Format newFormat = formatHolder.format;
-    eventDispatcher.inputFormatChanged(newFormat);
-    pendingPixelWidthHeightRatio = newFormat.pixelWidthHeightRatio;
-    pendingRotationDegrees = newFormat.rotationDegrees;
+  protected void onCodecReleased(String name) {
+    eventDispatcher.decoderReleased(name);
+  }
+
+  @Override
+  @Nullable
+  protected DecoderReuseEvaluation onInputFormatChanged(FormatHolder formatHolder)
+      throws ExoPlaybackException {
+    @Nullable DecoderReuseEvaluation evaluation = super.onInputFormatChanged(formatHolder);
+    eventDispatcher.inputFormatChanged(formatHolder.format, evaluation);
+    return evaluation;
   }
 
   /**
    * Called immediately before an input buffer is queued into the codec.
    *
+   * <p>In tunneling mode for pre Marshmallow, the buffer is treated as if immediately output.
+   *
    * @param buffer The buffer to be queued.
+   * @throws ExoPlaybackException Thrown if an error occurs handling the input buffer.
    */
   @CallSuper
   @Override
-  protected void onQueueInputBuffer(DecoderInputBuffer buffer) {
+  protected void onQueueInputBuffer(DecoderInputBuffer buffer) throws ExoPlaybackException {
     // In tunneling mode the device may do frame rate conversion, so in general we can't keep track
     // of the number of buffers in the codec.
     if (!tunneling) {
@@ -630,27 +709,48 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   }
 
   @Override
-  protected void onOutputMediaFormatChanged(MediaCodec codec, MediaFormat outputMediaFormat) {
-    currentMediaFormat = outputMediaFormat;
-    boolean hasCrop =
-        outputMediaFormat.containsKey(KEY_CROP_RIGHT)
-            && outputMediaFormat.containsKey(KEY_CROP_LEFT)
-            && outputMediaFormat.containsKey(KEY_CROP_BOTTOM)
-            && outputMediaFormat.containsKey(KEY_CROP_TOP);
-    int mediaFormatWidth =
-        hasCrop
-            ? outputMediaFormat.getInteger(KEY_CROP_RIGHT)
-                - outputMediaFormat.getInteger(KEY_CROP_LEFT)
-                + 1
-            : outputMediaFormat.getInteger(MediaFormat.KEY_WIDTH);
-    int mediaFormatHeight =
-        hasCrop
-            ? outputMediaFormat.getInteger(KEY_CROP_BOTTOM)
-                - outputMediaFormat.getInteger(KEY_CROP_TOP)
-                + 1
-            : outputMediaFormat.getInteger(MediaFormat.KEY_HEIGHT);
-    processOutputFormat(codec, mediaFormatWidth, mediaFormatHeight);
-    maybeNotifyVideoFrameProcessingOffset();
+  protected void onOutputFormatChanged(Format format, @Nullable MediaFormat mediaFormat) {
+    @Nullable MediaCodecAdapter codec = getCodec();
+    if (codec != null) {
+      // Must be applied each time the output format changes.
+      codec.setVideoScalingMode(scalingMode);
+    }
+    if (tunneling) {
+      currentWidth = format.width;
+      currentHeight = format.height;
+    } else {
+      Assertions.checkNotNull(mediaFormat);
+      boolean hasCrop =
+          mediaFormat.containsKey(KEY_CROP_RIGHT)
+              && mediaFormat.containsKey(KEY_CROP_LEFT)
+              && mediaFormat.containsKey(KEY_CROP_BOTTOM)
+              && mediaFormat.containsKey(KEY_CROP_TOP);
+      currentWidth =
+          hasCrop
+              ? mediaFormat.getInteger(KEY_CROP_RIGHT) - mediaFormat.getInteger(KEY_CROP_LEFT) + 1
+              : mediaFormat.getInteger(MediaFormat.KEY_WIDTH);
+      currentHeight =
+          hasCrop
+              ? mediaFormat.getInteger(KEY_CROP_BOTTOM) - mediaFormat.getInteger(KEY_CROP_TOP) + 1
+              : mediaFormat.getInteger(MediaFormat.KEY_HEIGHT);
+    }
+    currentPixelWidthHeightRatio = format.pixelWidthHeightRatio;
+    if (Util.SDK_INT >= 21) {
+      // On API level 21 and above the decoder applies the rotation when rendering to the surface.
+      // Hence currentUnappliedRotation should always be 0. For 90 and 270 degree rotations, we need
+      // to flip the width, height and pixel aspect ratio to reflect the rotation that was applied.
+      if (format.rotationDegrees == 90 || format.rotationDegrees == 270) {
+        int rotatedHeight = currentWidth;
+        currentWidth = currentHeight;
+        currentHeight = rotatedHeight;
+        currentPixelWidthHeightRatio = 1 / currentPixelWidthHeightRatio;
+      }
+    } else {
+      // On API level 20 and below the decoder does not apply the rotation.
+      currentUnappliedRotationDegrees = format.rotationDegrees;
+    }
+    frameReleaseTimeHelper.onFormatChanged(format.frameRate);
+    updateSurfaceFrameRate(/* isNewSurface= */ false);
   }
 
   @Override
@@ -688,8 +788,8 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   protected boolean processOutputBuffer(
       long positionUs,
       long elapsedRealtimeUs,
-      MediaCodec codec,
-      ByteBuffer buffer,
+      @Nullable MediaCodecAdapter codec,
+      @Nullable ByteBuffer buffer,
       int bufferIndex,
       int bufferFlags,
       int sampleCount,
@@ -698,8 +798,15 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       boolean isLastBuffer,
       Format format)
       throws ExoPlaybackException {
+    Assertions.checkNotNull(codec); // Can not render video without codec
+
     if (initialPositionUs == C.TIME_UNSET) {
       initialPositionUs = positionUs;
+    }
+
+    if (bufferPresentationTimeUs != lastBufferPresentationTimeUs) {
+      frameReleaseTimeHelper.onNextFrame(bufferPresentationTimeUs);
+      this.lastBufferPresentationTimeUs = bufferPresentationTimeUs;
     }
 
     long outputStreamOffsetUs = getOutputStreamOffsetUs();
@@ -710,20 +817,31 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       return true;
     }
 
-    long earlyUs = bufferPresentationTimeUs - positionUs;
+    // Note: Use of double rather than float is intentional for accuracy in the calculations below.
+    double playbackSpeed = getPlaybackSpeed();
+    boolean isStarted = getState() == STATE_STARTED;
+    long elapsedRealtimeNowUs = SystemClock.elapsedRealtime() * 1000;
+
+    // Calculate how early we are. In other words, the realtime duration that needs to elapse whilst
+    // the renderer is started before the frame should be rendered. A negative value means that
+    // we're already late.
+    long earlyUs = (long) ((bufferPresentationTimeUs - positionUs) / playbackSpeed);
+    if (isStarted) {
+      // Account for the elapsed time since the start of this iteration of the rendering loop.
+      earlyUs -= elapsedRealtimeNowUs - elapsedRealtimeUs;
+    }
+
     if (surface == dummySurface) {
       // Skip frames in sync with playback, so we'll be at the right frame if the mode changes.
       if (isBufferLate(earlyUs)) {
         skipOutputBuffer(codec, bufferIndex, presentationTimeUs);
-        decoderCounters.addVideoFrameProcessingOffsetSample(earlyUs);
+        updateVideoFrameProcessingOffsetCounters(earlyUs);
         return true;
       }
       return false;
     }
 
-    long elapsedRealtimeNowUs = SystemClock.elapsedRealtime() * 1000;
-    long elapsedSinceLastRenderUs = elapsedRealtimeNowUs - lastRenderTimeUs;
-    boolean isStarted = getState() == STATE_STARTED;
+    long elapsedSinceLastRenderUs = elapsedRealtimeNowUs - lastRenderRealtimeUs;
     boolean shouldRenderFirstFrame =
         !renderedFirstFrameAfterEnable
             ? (isStarted || mayRenderFirstFrameAfterEnableIfNotStarted)
@@ -736,13 +854,13 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
                 || (isStarted && shouldForceRenderOutputBuffer(earlyUs, elapsedSinceLastRenderUs)));
     if (forceRenderOutputBuffer) {
       long releaseTimeNs = System.nanoTime();
-      notifyFrameMetadataListener(presentationTimeUs, releaseTimeNs, format, currentMediaFormat);
+      notifyFrameMetadataListener(presentationTimeUs, releaseTimeNs, format);
       if (Util.SDK_INT >= 21) {
         renderOutputBufferV21(codec, bufferIndex, presentationTimeUs, releaseTimeNs);
       } else {
         renderOutputBuffer(codec, bufferIndex, presentationTimeUs);
       }
-      decoderCounters.addVideoFrameProcessingOffsetSample(earlyUs);
+      updateVideoFrameProcessingOffsetCounters(earlyUs);
       return true;
     }
 
@@ -750,24 +868,18 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       return false;
     }
 
-    // Fine-grained adjustment of earlyUs based on the elapsed time since the start of the current
-    // iteration of the rendering loop.
-    long elapsedSinceStartOfLoopUs = elapsedRealtimeNowUs - elapsedRealtimeUs;
-    earlyUs -= elapsedSinceStartOfLoopUs;
-
     // Compute the buffer's desired release time in nanoseconds.
     long systemTimeNs = System.nanoTime();
     long unadjustedFrameReleaseTimeNs = systemTimeNs + (earlyUs * 1000);
 
     // Apply a timestamp adjustment, if there is one.
-    long adjustedReleaseTimeNs = frameReleaseTimeHelper.adjustReleaseTime(
-        bufferPresentationTimeUs, unadjustedFrameReleaseTimeNs);
+    long adjustedReleaseTimeNs =
+        frameReleaseTimeHelper.adjustReleaseTime(unadjustedFrameReleaseTimeNs);
     earlyUs = (adjustedReleaseTimeNs - systemTimeNs) / 1000;
 
     boolean treatDroppedBuffersAsSkipped = joiningDeadlineMs != C.TIME_UNSET;
     if (shouldDropBuffersToKeyframe(earlyUs, elapsedRealtimeUs, isLastBuffer)
-        && maybeDropBuffersToKeyframe(
-            codec, bufferIndex, presentationTimeUs, positionUs, treatDroppedBuffersAsSkipped)) {
+        && maybeDropBuffersToKeyframe(positionUs, treatDroppedBuffersAsSkipped)) {
       return false;
     } else if (shouldDropOutputBuffer(earlyUs, elapsedRealtimeUs, isLastBuffer)) {
       if (treatDroppedBuffersAsSkipped) {
@@ -775,17 +887,16 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       } else {
         dropOutputBuffer(codec, bufferIndex, presentationTimeUs);
       }
-      decoderCounters.addVideoFrameProcessingOffsetSample(earlyUs);
+      updateVideoFrameProcessingOffsetCounters(earlyUs);
       return true;
     }
 
     if (Util.SDK_INT >= 21) {
       // Let the underlying framework time the release.
       if (earlyUs < 50000) {
-        notifyFrameMetadataListener(
-            presentationTimeUs, adjustedReleaseTimeNs, format, currentMediaFormat);
+        notifyFrameMetadataListener(presentationTimeUs, adjustedReleaseTimeNs, format);
         renderOutputBufferV21(codec, bufferIndex, presentationTimeUs, adjustedReleaseTimeNs);
-        decoderCounters.addVideoFrameProcessingOffsetSample(earlyUs);
+        updateVideoFrameProcessingOffsetCounters(earlyUs);
         return true;
       }
     } else {
@@ -802,10 +913,9 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
             return false;
           }
         }
-        notifyFrameMetadataListener(
-            presentationTimeUs, adjustedReleaseTimeNs, format, currentMediaFormat);
+        notifyFrameMetadataListener(presentationTimeUs, adjustedReleaseTimeNs, format);
         renderOutputBuffer(codec, bufferIndex, presentationTimeUs);
-        decoderCounters.addVideoFrameProcessingOffsetSample(earlyUs);
+        updateVideoFrameProcessingOffsetCounters(earlyUs);
         return true;
       }
     }
@@ -814,42 +924,17 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     return false;
   }
 
-  private void processOutputFormat(MediaCodec codec, int width, int height) {
-    currentWidth = width;
-    currentHeight = height;
-    currentPixelWidthHeightRatio = pendingPixelWidthHeightRatio;
-    if (Util.SDK_INT >= 21) {
-      // On API level 21 and above the decoder applies the rotation when rendering to the surface.
-      // Hence currentUnappliedRotation should always be 0. For 90 and 270 degree rotations, we need
-      // to flip the width, height and pixel aspect ratio to reflect the rotation that was applied.
-      if (pendingRotationDegrees == 90 || pendingRotationDegrees == 270) {
-        int rotatedHeight = currentWidth;
-        currentWidth = currentHeight;
-        currentHeight = rotatedHeight;
-        currentPixelWidthHeightRatio = 1 / currentPixelWidthHeightRatio;
-      }
-    } else {
-      // On API level 20 and below the decoder does not apply the rotation.
-      currentUnappliedRotationDegrees = pendingRotationDegrees;
-    }
-    // Must be applied each time the output MediaFormat changes.
-    codec.setVideoScalingMode(scalingMode);
-  }
-
   private void notifyFrameMetadataListener(
-      long presentationTimeUs, long releaseTimeNs, Format format, MediaFormat mediaFormat) {
+      long presentationTimeUs, long releaseTimeNs, Format format) {
     if (frameMetadataListener != null) {
       frameMetadataListener.onVideoFrameAboutToBeRendered(
-          presentationTimeUs, releaseTimeNs, format, mediaFormat);
+          presentationTimeUs, releaseTimeNs, format, getCodecOutputMediaFormat());
     }
   }
 
   /** Called when a buffer was processed in tunneling mode. */
-  protected void onProcessedTunneledBuffer(long presentationTimeUs) {
-    @Nullable Format format = updateOutputFormatForTime(presentationTimeUs);
-    if (format != null) {
-      processOutputFormat(getCodec(), format.width, format.height);
-    }
+  protected void onProcessedTunneledBuffer(long presentationTimeUs) throws ExoPlaybackException {
+    updateOutputFormatForTime(presentationTimeUs);
     maybeNotifyVideoSizeChanged();
     decoderCounters.renderedOutputBufferCount++;
     maybeNotifyRenderedFirstFrame();
@@ -926,7 +1011,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
    * @param index The index of the output buffer to skip.
    * @param presentationTimeUs The presentation time of the output buffer, in microseconds.
    */
-  protected void skipOutputBuffer(MediaCodec codec, int index, long presentationTimeUs) {
+  protected void skipOutputBuffer(MediaCodecAdapter codec, int index, long presentationTimeUs) {
     TraceUtil.beginSection("skipVideoBuffer");
     codec.releaseOutputBuffer(index, false);
     TraceUtil.endSection();
@@ -940,7 +1025,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
    * @param index The index of the output buffer to drop.
    * @param presentationTimeUs The presentation time of the output buffer, in microseconds.
    */
-  protected void dropOutputBuffer(MediaCodec codec, int index, long presentationTimeUs) {
+  protected void dropOutputBuffer(MediaCodecAdapter codec, int index, long presentationTimeUs) {
     TraceUtil.beginSection("dropVideoBuffer");
     codec.releaseOutputBuffer(index, false);
     TraceUtil.endSection();
@@ -952,9 +1037,6 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
    * position. If no such keyframe exists, as the playback position is inside the same group of
    * pictures as the buffer being processed, returns {@code false}. Returns {@code true} otherwise.
    *
-   * @param codec The codec that owns the output buffer.
-   * @param index The index of the output buffer to drop.
-   * @param presentationTimeUs The presentation time of the output buffer, in microseconds.
    * @param positionUs The current playback position, in microseconds.
    * @param treatDroppedBuffersAsSkipped Whether dropped buffers should be treated as intentionally
    *     skipped.
@@ -962,9 +1044,6 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
    * @throws ExoPlaybackException If an error occurs flushing the codec.
    */
   protected boolean maybeDropBuffersToKeyframe(
-      MediaCodec codec,
-      int index,
-      long presentationTimeUs,
       long positionUs,
       boolean treatDroppedBuffersAsSkipped)
       throws ExoPlaybackException {
@@ -986,8 +1065,8 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   }
 
   /**
-   * Updates decoder counters to reflect that {@code droppedBufferCount} additional buffers were
-   * dropped.
+   * Updates local counters and {@link DecoderCounters} to reflect that {@code droppedBufferCount}
+   * additional buffers were dropped.
    *
    * @param droppedBufferCount The number of additional dropped buffers.
    */
@@ -995,11 +1074,22 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     decoderCounters.droppedBufferCount += droppedBufferCount;
     droppedFrames += droppedBufferCount;
     consecutiveDroppedFrameCount += droppedBufferCount;
-    decoderCounters.maxConsecutiveDroppedBufferCount = Math.max(consecutiveDroppedFrameCount,
-        decoderCounters.maxConsecutiveDroppedBufferCount);
+    decoderCounters.maxConsecutiveDroppedBufferCount =
+        max(consecutiveDroppedFrameCount, decoderCounters.maxConsecutiveDroppedBufferCount);
     if (maxDroppedFramesToNotify > 0 && droppedFrames >= maxDroppedFramesToNotify) {
       maybeNotifyDroppedFrames();
     }
+  }
+
+  /**
+   * Updates local counters and {@link DecoderCounters} with a new video frame processing offset.
+   *
+   * @param processingOffsetUs The video frame processing offset.
+   */
+  protected void updateVideoFrameProcessingOffsetCounters(long processingOffsetUs) {
+    decoderCounters.addVideoFrameProcessingOffset(processingOffsetUs);
+    totalVideoFrameProcessingOffsetUs += processingOffsetUs;
+    videoFrameProcessingOffsetCount++;
   }
 
   /**
@@ -1010,12 +1100,12 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
    * @param index The index of the output buffer to drop.
    * @param presentationTimeUs The presentation time of the output buffer, in microseconds.
    */
-  protected void renderOutputBuffer(MediaCodec codec, int index, long presentationTimeUs) {
+  protected void renderOutputBuffer(MediaCodecAdapter codec, int index, long presentationTimeUs) {
     maybeNotifyVideoSizeChanged();
     TraceUtil.beginSection("releaseOutputBuffer");
     codec.releaseOutputBuffer(index, true);
     TraceUtil.endSection();
-    lastRenderTimeUs = SystemClock.elapsedRealtime() * 1000;
+    lastRenderRealtimeUs = SystemClock.elapsedRealtime() * 1000;
     decoderCounters.renderedOutputBufferCount++;
     consecutiveDroppedFrameCount = 0;
     maybeNotifyRenderedFirstFrame();
@@ -1032,15 +1122,59 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
    */
   @RequiresApi(21)
   protected void renderOutputBufferV21(
-      MediaCodec codec, int index, long presentationTimeUs, long releaseTimeNs) {
+      MediaCodecAdapter codec, int index, long presentationTimeUs, long releaseTimeNs) {
     maybeNotifyVideoSizeChanged();
     TraceUtil.beginSection("releaseOutputBuffer");
     codec.releaseOutputBuffer(index, releaseTimeNs);
     TraceUtil.endSection();
-    lastRenderTimeUs = SystemClock.elapsedRealtime() * 1000;
+    lastRenderRealtimeUs = SystemClock.elapsedRealtime() * 1000;
     decoderCounters.renderedOutputBufferCount++;
     consecutiveDroppedFrameCount = 0;
     maybeNotifyRenderedFirstFrame();
+  }
+
+  /**
+   * Updates the frame-rate of the current {@link #surface} based on the renderer operating rate,
+   * frame-rate of the content, and whether the renderer is started.
+   *
+   * @param isNewSurface Whether the current {@link #surface} is new.
+   */
+  private void updateSurfaceFrameRate(boolean isNewSurface) {
+    if (Util.SDK_INT < 30 || surface == null || surface == dummySurface) {
+      return;
+    }
+    float playbackFrameRate = frameReleaseTimeHelper.getPlaybackFrameRate();
+    float surfaceFrameRate =
+        getState() == STATE_STARTED && playbackFrameRate != C.RATE_UNSET ? playbackFrameRate : 0;
+    // We always set the frame-rate if we have a new surface, since we have no way of knowing what
+    // it might have been set to previously.
+    if (this.surfaceFrameRate == surfaceFrameRate && !isNewSurface) {
+      return;
+    }
+    this.surfaceFrameRate = surfaceFrameRate;
+    setSurfaceFrameRateV30(surface, surfaceFrameRate);
+  }
+
+  /** Clears the frame-rate of the current {@link #surface}. */
+  private void clearSurfaceFrameRate() {
+    if (Util.SDK_INT < 30 || surface == null || surface == dummySurface || surfaceFrameRate == 0) {
+      return;
+    }
+    surfaceFrameRate = 0;
+    setSurfaceFrameRateV30(surface, /* frameRate= */ 0);
+  }
+
+  @RequiresApi(30)
+  private static void setSurfaceFrameRateV30(Surface surface, float frameRate) {
+    int compatibility =
+        frameRate == 0
+            ? Surface.FRAME_RATE_COMPATIBILITY_DEFAULT
+            : Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE;
+    try {
+      surface.setFrameRate(frameRate, compatibility);
+    } catch (IllegalStateException e) {
+      Log.e(TAG, "Failed to call Surface.setFrameRate", e);
+    }
   }
 
   private boolean shouldUseDummySurface(MediaCodecInfo codecInfo) {
@@ -1062,7 +1196,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     // OnFrameRenderedListenerV23.onFrameRenderedListener for tunneled playback on API level 23 and
     // above.
     if (Util.SDK_INT >= 23 && tunneling) {
-      MediaCodec codec = getCodec();
+      @Nullable MediaCodecAdapter codec = getCodec();
       // If codec is null then the listener will be instantiated in configureCodec.
       if (codec != null) {
         tunnelingOnFrameRenderedListener = new OnFrameRenderedListenerV23(codec);
@@ -1075,11 +1209,12 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     if (!renderedFirstFrameAfterReset) {
       renderedFirstFrameAfterReset = true;
       eventDispatcher.renderedFirstFrame(surface);
+      haveReportedFirstFrameRenderedForCurrentSurface = true;
     }
   }
 
   private void maybeRenotifyRenderedFirstFrame() {
-    if (renderedFirstFrameAfterReset) {
+    if (haveReportedFirstFrameRenderedForCurrentSurface) {
       eventDispatcher.renderedFirstFrame(surface);
     }
   }
@@ -1123,18 +1258,11 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   }
 
   private void maybeNotifyVideoFrameProcessingOffset() {
-    Format outputFormat = getCurrentOutputFormat();
-    if (outputFormat != null) {
-      long totalOffsetDelta =
-          decoderCounters.totalVideoFrameProcessingOffsetUs - totalVideoFrameProcessingOffsetUs;
-      int countDelta =
-          decoderCounters.videoFrameProcessingOffsetCount - videoFrameProcessingOffsetCount;
-      if (countDelta != 0) {
-        eventDispatcher.reportVideoFrameProcessingOffset(
-            totalOffsetDelta, countDelta, outputFormat);
-        totalVideoFrameProcessingOffsetUs = decoderCounters.totalVideoFrameProcessingOffsetUs;
-        videoFrameProcessingOffsetCount = decoderCounters.videoFrameProcessingOffsetCount;
-      }
+    if (videoFrameProcessingOffsetCount != 0) {
+      eventDispatcher.reportVideoFrameProcessingOffset(
+          totalVideoFrameProcessingOffsetUs, videoFrameProcessingOffsetCount);
+      totalVideoFrameProcessingOffsetUs = 0;
+      videoFrameProcessingOffsetCount = 0;
     }
   }
 
@@ -1149,14 +1277,14 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   }
 
   @RequiresApi(29)
-  private static void setHdr10PlusInfoV29(MediaCodec codec, byte[] hdr10PlusInfo) {
+  private static void setHdr10PlusInfoV29(MediaCodecAdapter codec, byte[] hdr10PlusInfo) {
     Bundle codecParameters = new Bundle();
     codecParameters.putByteArray(MediaCodec.PARAMETER_KEY_HDR10_PLUS_INFO, hdr10PlusInfo);
     codec.setParameters(codecParameters);
   }
 
   @RequiresApi(23)
-  private static void setOutputSurfaceV23(MediaCodec codec, Surface surface) {
+  protected void setOutputSurfaceV23(MediaCodecAdapter codec, Surface surface) {
     codec.setOutputSurface(surface);
   }
 
@@ -1257,30 +1385,34 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
           int scaledMaxInputSize =
               (int) (maxInputSize * INITIAL_FORMAT_MAX_INPUT_SIZE_SCALE_FACTOR);
           // Avoid exceeding the maximum expected for the codec.
-          maxInputSize = Math.min(scaledMaxInputSize, codecMaxInputSize);
+          maxInputSize = min(scaledMaxInputSize, codecMaxInputSize);
         }
       }
       return new CodecMaxValues(maxWidth, maxHeight, maxInputSize);
     }
     boolean haveUnknownDimensions = false;
     for (Format streamFormat : streamFormats) {
-      if (codecInfo.isSeamlessAdaptationSupported(
-          format, streamFormat, /* isNewFormatComplete= */ false)) {
+      if (format.colorInfo != null && streamFormat.colorInfo == null) {
+        // streamFormat likely has incomplete color information. Copy the complete color information
+        // from format to avoid codec re-use being ruled out for only this reason.
+        streamFormat = streamFormat.buildUpon().setColorInfo(format.colorInfo).build();
+      }
+      if (codecInfo.canReuseCodec(format, streamFormat).result != REUSE_RESULT_NO) {
         haveUnknownDimensions |=
             (streamFormat.width == Format.NO_VALUE || streamFormat.height == Format.NO_VALUE);
-        maxWidth = Math.max(maxWidth, streamFormat.width);
-        maxHeight = Math.max(maxHeight, streamFormat.height);
-        maxInputSize = Math.max(maxInputSize, getMaxInputSize(codecInfo, streamFormat));
+        maxWidth = max(maxWidth, streamFormat.width);
+        maxHeight = max(maxHeight, streamFormat.height);
+        maxInputSize = max(maxInputSize, getMaxInputSize(codecInfo, streamFormat));
       }
     }
     if (haveUnknownDimensions) {
       Log.w(TAG, "Resolutions unknown. Codec max resolution: " + maxWidth + "x" + maxHeight);
       Point codecMaxSize = getCodecMaxSize(codecInfo, format);
       if (codecMaxSize != null) {
-        maxWidth = Math.max(maxWidth, codecMaxSize.x);
-        maxHeight = Math.max(maxHeight, codecMaxSize.y);
+        maxWidth = max(maxWidth, codecMaxSize.x);
+        maxHeight = max(maxHeight, codecMaxSize.y);
         maxInputSize =
-            Math.max(
+            max(
                 maxInputSize,
                 getCodecMaxInputSize(codecInfo, format.sampleMimeType, maxWidth, maxHeight));
         Log.w(TAG, "Codec max resolution adjusted to: " + maxWidth + "x" + maxHeight);
@@ -1348,7 +1480,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
    * @return A maximum input buffer size in bytes, or {@link Format#NO_VALUE} if a maximum could not
    *     be determined.
    */
-  private static int getMaxInputSize(MediaCodecInfo codecInfo, Format format) {
+  protected static int getMaxInputSize(MediaCodecInfo codecInfo, Format format) {
     if (format.maxInputSize != Format.NO_VALUE) {
       // The format defines an explicit maximum input size. Add the total size of initialization
       // data buffers, as they may need to be queued in the same input buffer as the largest sample.
@@ -1469,178 +1601,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     }
     synchronized (MediaCodecVideoRenderer.class) {
       if (!evaluatedDeviceNeedsSetOutputSurfaceWorkaround) {
-        if ("dangal".equals(Util.DEVICE)) {
-          // Workaround for MiTV devices:
-          // https://github.com/google/ExoPlayer/issues/5169,
-          // https://github.com/google/ExoPlayer/issues/6899.
-          deviceNeedsSetOutputSurfaceWorkaround = true;
-        } else if (Util.SDK_INT <= 27 && "HWEML".equals(Util.DEVICE)) {
-          // Workaround for Huawei P20:
-          // https://github.com/google/ExoPlayer/issues/4468#issuecomment-459291645.
-          deviceNeedsSetOutputSurfaceWorkaround = true;
-        } else if (Util.SDK_INT >= 27) {
-          // In general, devices running API level 27 or later should be unaffected. Do nothing.
-        } else {
-          // Enable the workaround on a per-device basis. Works around:
-          // https://github.com/google/ExoPlayer/issues/3236,
-          // https://github.com/google/ExoPlayer/issues/3355,
-          // https://github.com/google/ExoPlayer/issues/3439,
-          // https://github.com/google/ExoPlayer/issues/3724,
-          // https://github.com/google/ExoPlayer/issues/3835,
-          // https://github.com/google/ExoPlayer/issues/4006,
-          // https://github.com/google/ExoPlayer/issues/4084,
-          // https://github.com/google/ExoPlayer/issues/4104,
-          // https://github.com/google/ExoPlayer/issues/4134,
-          // https://github.com/google/ExoPlayer/issues/4315,
-          // https://github.com/google/ExoPlayer/issues/4419,
-          // https://github.com/google/ExoPlayer/issues/4460,
-          // https://github.com/google/ExoPlayer/issues/4468,
-          // https://github.com/google/ExoPlayer/issues/5312,
-          // https://github.com/google/ExoPlayer/issues/6503.
-          switch (Util.DEVICE) {
-            case "1601":
-            case "1713":
-            case "1714":
-            case "A10-70F":
-            case "A10-70L":
-            case "A1601":
-            case "A2016a40":
-            case "A7000-a":
-            case "A7000plus":
-            case "A7010a48":
-            case "A7020a48":
-            case "AquaPowerM":
-            case "ASUS_X00AD_2":
-            case "Aura_Note_2":
-            case "BLACK-1X":
-            case "BRAVIA_ATV2":
-            case "BRAVIA_ATV3_4K":
-            case "C1":
-            case "ComioS1":
-            case "CP8676_I02":
-            case "CPH1609":
-            case "CPY83_I00":
-            case "cv1":
-            case "cv3":
-            case "deb":
-            case "E5643":
-            case "ELUGA_A3_Pro":
-            case "ELUGA_Note":
-            case "ELUGA_Prim":
-            case "ELUGA_Ray_X":
-            case "EverStar_S":
-            case "F3111":
-            case "F3113":
-            case "F3116":
-            case "F3211":
-            case "F3213":
-            case "F3215":
-            case "F3311":
-            case "flo":
-            case "fugu":
-            case "GiONEE_CBL7513":
-            case "GiONEE_GBL7319":
-            case "GIONEE_GBL7360":
-            case "GIONEE_SWW1609":
-            case "GIONEE_SWW1627":
-            case "GIONEE_SWW1631":
-            case "GIONEE_WBL5708":
-            case "GIONEE_WBL7365":
-            case "GIONEE_WBL7519":
-            case "griffin":
-            case "htc_e56ml_dtul":
-            case "hwALE-H":
-            case "HWBLN-H":
-            case "HWCAM-H":
-            case "HWVNS-H":
-            case "HWWAS-H":
-            case "i9031":
-            case "iball8735_9806":
-            case "Infinix-X572":
-            case "iris60":
-            case "itel_S41":
-            case "j2xlteins":
-            case "JGZ":
-            case "K50a40":
-            case "kate":
-            case "l5460":
-            case "le_x6":
-            case "LS-5017":
-            case "M5c":
-            case "manning":
-            case "marino_f":
-            case "MEIZU_M5":
-            case "mh":
-            case "mido":
-            case "MX6":
-            case "namath":
-            case "nicklaus_f":
-            case "NX541J":
-            case "NX573J":
-            case "OnePlus5T":
-            case "p212":
-            case "P681":
-            case "P85":
-            case "panell_d":
-            case "panell_dl":
-            case "panell_ds":
-            case "panell_dt":
-            case "PB2-670M":
-            case "PGN528":
-            case "PGN610":
-            case "PGN611":
-            case "Phantom6":
-            case "Pixi4-7_3G":
-            case "Pixi5-10_4G":
-            case "PLE":
-            case "PRO7S":
-            case "Q350":
-            case "Q4260":
-            case "Q427":
-            case "Q4310":
-            case "Q5":
-            case "QM16XE_U":
-            case "QX1":
-            case "santoni":
-            case "Slate_Pro":
-            case "SVP-DTV15":
-            case "s905x018":
-            case "taido_row":
-            case "TB3-730F":
-            case "TB3-730X":
-            case "TB3-850F":
-            case "TB3-850M":
-            case "tcl_eu":
-            case "V1":
-            case "V23GB":
-            case "V5":
-            case "vernee_M5":
-            case "watson":
-            case "whyred":
-            case "woods_f":
-            case "woods_fn":
-            case "X3_HK":
-            case "XE2X":
-            case "XT1663":
-            case "Z12_PRO":
-            case "Z80":
-              deviceNeedsSetOutputSurfaceWorkaround = true;
-              break;
-            default:
-              // Do nothing.
-              break;
-          }
-          switch (Util.MODEL) {
-            case "AFTA":
-            case "AFTN":
-            case "JSN-L21":
-              deviceNeedsSetOutputSurfaceWorkaround = true;
-              break;
-            default:
-              // Do nothing.
-              break;
-          }
-        }
+        deviceNeedsSetOutputSurfaceWorkaround = evaluateDeviceNeedsSetOutputSurfaceWorkaround();
         evaluatedDeviceNeedsSetOutputSurfaceWorkaround = true;
       }
     }
@@ -1662,24 +1623,222 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       this.height = height;
       this.inputSize = inputSize;
     }
+  }
 
+  private static boolean evaluateDeviceNeedsSetOutputSurfaceWorkaround() {
+    if (Util.SDK_INT <= 28) {
+      // Workaround for MiTV devices which have been observed broken up to API 28.
+      // https://github.com/google/ExoPlayer/issues/5169,
+      // https://github.com/google/ExoPlayer/issues/6899.
+      // https://github.com/google/ExoPlayer/issues/8014.
+      switch (Util.DEVICE) {
+        case "dangal":
+        case "dangalUHD":
+        case "dangalFHD":
+        case "magnolia":
+        case "machuca":
+          return true;
+        default:
+          break; // Do nothing.
+      }
+    }
+    if (Util.SDK_INT <= 27 && "HWEML".equals(Util.DEVICE)) {
+      // Workaround for Huawei P20:
+      // https://github.com/google/ExoPlayer/issues/4468#issuecomment-459291645.
+      return true;
+    }
+    if (Util.SDK_INT <= 26) {
+      // In general, devices running API level 27 or later should be unaffected unless observed
+      // otherwise. Enable the workaround on a per-device basis. Works around:
+      // https://github.com/google/ExoPlayer/issues/3236,
+      // https://github.com/google/ExoPlayer/issues/3355,
+      // https://github.com/google/ExoPlayer/issues/3439,
+      // https://github.com/google/ExoPlayer/issues/3724,
+      // https://github.com/google/ExoPlayer/issues/3835,
+      // https://github.com/google/ExoPlayer/issues/4006,
+      // https://github.com/google/ExoPlayer/issues/4084,
+      // https://github.com/google/ExoPlayer/issues/4104,
+      // https://github.com/google/ExoPlayer/issues/4134,
+      // https://github.com/google/ExoPlayer/issues/4315,
+      // https://github.com/google/ExoPlayer/issues/4419,
+      // https://github.com/google/ExoPlayer/issues/4460,
+      // https://github.com/google/ExoPlayer/issues/4468,
+      // https://github.com/google/ExoPlayer/issues/5312,
+      // https://github.com/google/ExoPlayer/issues/6503.
+      // https://github.com/google/ExoPlayer/issues/8014,
+      // https://github.com/google/ExoPlayer/pull/8030.
+      switch (Util.DEVICE) {
+        case "1601":
+        case "1713":
+        case "1714":
+        case "601LV":
+        case "602LV":
+        case "A10-70F":
+        case "A10-70L":
+        case "A1601":
+        case "A2016a40":
+        case "A7000-a":
+        case "A7000plus":
+        case "A7010a48":
+        case "A7020a48":
+        case "AquaPowerM":
+        case "ASUS_X00AD_2":
+        case "Aura_Note_2":
+        case "b5":
+        case "BLACK-1X":
+        case "BRAVIA_ATV2":
+        case "BRAVIA_ATV3_4K":
+        case "C1":
+        case "ComioS1":
+        case "CP8676_I02":
+        case "CPH1609":
+        case "CPH1715":
+        case "CPY83_I00":
+        case "cv1":
+        case "cv3":
+        case "deb":
+        case "DM-01K":
+        case "E5643":
+        case "ELUGA_A3_Pro":
+        case "ELUGA_Note":
+        case "ELUGA_Prim":
+        case "ELUGA_Ray_X":
+        case "EverStar_S":
+        case "F01H":
+        case "F01J":
+        case "F02H":
+        case "F03H":
+        case "F04H":
+        case "F04J":
+        case "F3111":
+        case "F3113":
+        case "F3116":
+        case "F3211":
+        case "F3213":
+        case "F3215":
+        case "F3311":
+        case "flo":
+        case "fugu":
+        case "GiONEE_CBL7513":
+        case "GiONEE_GBL7319":
+        case "GIONEE_GBL7360":
+        case "GIONEE_SWW1609":
+        case "GIONEE_SWW1627":
+        case "GIONEE_SWW1631":
+        case "GIONEE_WBL5708":
+        case "GIONEE_WBL7365":
+        case "GIONEE_WBL7519":
+        case "griffin":
+        case "htc_e56ml_dtul":
+        case "hwALE-H":
+        case "HWBLN-H":
+        case "HWCAM-H":
+        case "HWVNS-H":
+        case "HWWAS-H":
+        case "i9031":
+        case "iball8735_9806":
+        case "Infinix-X572":
+        case "iris60":
+        case "itel_S41":
+        case "j2xlteins":
+        case "JGZ":
+        case "K50a40":
+        case "kate":
+        case "l5460":
+        case "le_x6":
+        case "LS-5017":
+        case "M04":
+        case "M5c":
+        case "manning":
+        case "marino_f":
+        case "MEIZU_M5":
+        case "mh":
+        case "mido":
+        case "MX6":
+        case "namath":
+        case "nicklaus_f":
+        case "NX541J":
+        case "NX573J":
+        case "OnePlus5T":
+        case "p212":
+        case "P681":
+        case "P85":
+        case "pacificrim":
+        case "panell_d":
+        case "panell_dl":
+        case "panell_ds":
+        case "panell_dt":
+        case "PB2-670M":
+        case "PGN528":
+        case "PGN610":
+        case "PGN611":
+        case "Phantom6":
+        case "Pixi4-7_3G":
+        case "Pixi5-10_4G":
+        case "PLE":
+        case "PRO7S":
+        case "Q350":
+        case "Q4260":
+        case "Q427":
+        case "Q4310":
+        case "Q5":
+        case "QM16XE_U":
+        case "QX1":
+        case "RAIJIN":
+        case "santoni":
+        case "Slate_Pro":
+        case "SVP-DTV15":
+        case "s905x018":
+        case "taido_row":
+        case "TB3-730F":
+        case "TB3-730X":
+        case "TB3-850F":
+        case "TB3-850M":
+        case "tcl_eu":
+        case "V1":
+        case "V23GB":
+        case "V5":
+        case "vernee_M5":
+        case "watson":
+        case "whyred":
+        case "woods_f":
+        case "woods_fn":
+        case "X3_HK":
+        case "XE2X":
+        case "XT1663":
+        case "Z12_PRO":
+        case "Z80":
+          return true;
+        default:
+          break; // Do nothing.
+      }
+      switch (Util.MODEL) {
+        case "AFTA":
+        case "AFTN":
+        case "JSN-L21":
+          return true;
+        default:
+          break; // Do nothing.
+      }
+    }
+    return false;
   }
 
   @RequiresApi(23)
   private final class OnFrameRenderedListenerV23
-      implements MediaCodec.OnFrameRenderedListener, Handler.Callback {
+      implements MediaCodecAdapter.OnFrameRenderedListener, Handler.Callback {
 
     private static final int HANDLE_FRAME_RENDERED = 0;
 
     private final Handler handler;
 
-    public OnFrameRenderedListenerV23(MediaCodec codec) {
-      handler = Util.createHandler(/* callback= */ this);
+    public OnFrameRenderedListenerV23(MediaCodecAdapter codec) {
+      handler = Util.createHandlerForCurrentLooper(/* callback= */ this);
       codec.setOnFrameRenderedListener(/* listener= */ this, handler);
     }
 
     @Override
-    public void onFrameRendered(MediaCodec codec, long presentationTimeUs, long nanoTime) {
+    public void onFrameRendered(MediaCodecAdapter codec, long presentationTimeUs, long nanoTime) {
       // Workaround bug in MediaCodec that causes deadlock if you call directly back into the
       // MediaCodec from this listener method.
       // Deadlock occurs because MediaCodec calls this listener method holding a lock,
@@ -1719,7 +1878,11 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       if (presentationTimeUs == TUNNELING_EOS_PRESENTATION_TIME_US) {
         onProcessedTunneledEndOfStream();
       } else {
-        onProcessedTunneledBuffer(presentationTimeUs);
+        try {
+          onProcessedTunneledBuffer(presentationTimeUs);
+        } catch (ExoPlaybackException e) {
+          setPendingPlaybackException(e);
+        }
       }
     }
   }

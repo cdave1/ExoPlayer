@@ -15,10 +15,11 @@
  */
 package com.google.android.exoplayer2.trackselection;
 
+import static com.google.android.exoplayer2.C.FORMAT_EXCEEDS_CAPABILITIES;
+import static com.google.android.exoplayer2.C.FORMAT_HANDLED;
+import static com.google.android.exoplayer2.C.FORMAT_UNSUPPORTED_SUBTYPE;
 import static com.google.android.exoplayer2.RendererCapabilities.ADAPTIVE_NOT_SEAMLESS;
-import static com.google.android.exoplayer2.RendererCapabilities.FORMAT_EXCEEDS_CAPABILITIES;
-import static com.google.android.exoplayer2.RendererCapabilities.FORMAT_HANDLED;
-import static com.google.android.exoplayer2.RendererCapabilities.FORMAT_UNSUPPORTED_SUBTYPE;
+import static com.google.android.exoplayer2.RendererCapabilities.TUNNELING_NOT_SUPPORTED;
 import static com.google.android.exoplayer2.RendererConfiguration.DEFAULT;
 import static com.google.common.truth.Truth.assertThat;
 import static org.mockito.Mockito.never;
@@ -50,6 +51,7 @@ import com.google.android.exoplayer2.trackselection.TrackSelector.InvalidationLi
 import com.google.android.exoplayer2.upstream.BandwidthMeter;
 import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.Util;
+import com.google.common.collect.ImmutableList;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.Before;
@@ -67,7 +69,8 @@ public final class DefaultTrackSelectorTest {
   private static final RendererCapabilities ALL_TEXT_FORMAT_SUPPORTED_RENDERER_CAPABILITIES =
       new FakeRendererCapabilities(C.TRACK_TYPE_TEXT);
   private static final RendererCapabilities ALL_AUDIO_FORMAT_EXCEEDED_RENDERER_CAPABILITIES =
-      new FakeRendererCapabilities(C.TRACK_TYPE_AUDIO, FORMAT_EXCEEDS_CAPABILITIES);
+      new FakeRendererCapabilities(
+          C.TRACK_TYPE_AUDIO, RendererCapabilities.create(FORMAT_EXCEEDS_CAPABILITIES));
 
   private static final RendererCapabilities VIDEO_CAPABILITIES =
       new FakeRendererCapabilities(C.TRACK_TYPE_VIDEO);
@@ -106,7 +109,7 @@ public final class DefaultTrackSelectorTest {
   private static final TrackSelection[] TRACK_SELECTIONS_WITH_NO_SAMPLE_RENDERER =
       new TrackSelection[] {new FixedTrackSelection(VIDEO_TRACK_GROUP, 0), null};
 
-  private static final Timeline TIMELINE = new FakeTimeline(/* windowCount= */ 1);
+  private static final Timeline TIMELINE = new FakeTimeline();
 
   private static MediaPeriodId periodId;
 
@@ -131,51 +134,16 @@ public final class DefaultTrackSelectorTest {
     trackSelector.init(invalidationListener, bandwidthMeter);
   }
 
+  @Test
+  public void parameters_buildUponThenBuild_isEqual() {
+    Parameters parameters = buildParametersForEqualsTest();
+    assertThat(parameters.buildUpon().build()).isEqualTo(parameters);
+  }
+
   /** Tests {@link Parameters} {@link android.os.Parcelable} implementation. */
   @Test
-  public void parametersParcelable() {
-    SparseArray<Map<TrackGroupArray, SelectionOverride>> selectionOverrides = new SparseArray<>();
-    Map<TrackGroupArray, SelectionOverride> videoOverrides = new HashMap<>();
-    videoOverrides.put(new TrackGroupArray(VIDEO_TRACK_GROUP), new SelectionOverride(0, 1));
-    selectionOverrides.put(2, videoOverrides);
-
-    SparseBooleanArray rendererDisabledFlags = new SparseBooleanArray();
-    rendererDisabledFlags.put(3, true);
-
-    Parameters parametersToParcel =
-        new Parameters(
-            // Video
-            /* maxVideoWidth= */ 0,
-            /* maxVideoHeight= */ 1,
-            /* maxVideoFrameRate= */ 2,
-            /* maxVideoBitrate= */ 3,
-            /* exceedVideoConstraintsIfNecessary= */ false,
-            /* allowVideoMixedMimeTypeAdaptiveness= */ true,
-            /* allowVideoNonSeamlessAdaptiveness= */ false,
-            /* viewportWidth= */ 4,
-            /* viewportHeight= */ 5,
-            /* viewportOrientationMayChange= */ true,
-            // Audio
-            /* preferredAudioLanguage= */ "en",
-            /* maxAudioChannelCount= */ 6,
-            /* maxAudioBitrate= */ 7,
-            /* exceedAudioConstraintsIfNecessary= */ false,
-            /* allowAudioMixedMimeTypeAdaptiveness= */ true,
-            /* allowAudioMixedSampleRateAdaptiveness= */ false,
-            /* allowAudioMixedChannelCountAdaptiveness= */ true,
-            // Text
-            /* preferredTextLanguage= */ "de",
-            /* preferredTextRoleFlags= */ C.ROLE_FLAG_CAPTION,
-            /* selectUndeterminedTextLanguage= */ true,
-            /* disabledTextTrackSelectionFlags= */ 8,
-            // General
-            /* forceLowestBitrate= */ false,
-            /* forceHighestSupportedBitrate= */ true,
-            /* exceedRendererCapabilitiesIfNecessary= */ false,
-            /* tunnelingAudioSessionId= */ C.AUDIO_SESSION_ID_UNSET,
-            // Overrides
-            selectionOverrides,
-            rendererDisabledFlags);
+  public void parameters_parcelAndUnParcelable() {
+    Parameters parametersToParcel = buildParametersForEqualsTest();
 
     Parcel parcel = Parcel.obtain();
     parametersToParcel.writeToParcel(parcel, 0);
@@ -1353,7 +1321,10 @@ public final class DefaultTrackSelectorTest {
   @Test
   public void selectTracksWithMultipleVideoTracksWithNonSeamlessAdaptiveness() throws Exception {
     FakeRendererCapabilities nonSeamlessVideoCapabilities =
-        new FakeRendererCapabilities(C.TRACK_TYPE_VIDEO, FORMAT_HANDLED | ADAPTIVE_NOT_SEAMLESS);
+        new FakeRendererCapabilities(
+            C.TRACK_TYPE_VIDEO,
+            RendererCapabilities.create(
+                FORMAT_HANDLED, ADAPTIVE_NOT_SEAMLESS, TUNNELING_NOT_SUPPORTED));
 
     // Should do non-seamless adaptiveness by default, so expect an adaptive selection.
     Format.Builder formatBuilder = VIDEO_FORMAT.buildUpon();
@@ -1511,9 +1482,64 @@ public final class DefaultTrackSelectorTest {
   }
 
   /**
-   * A {@link RendererCapabilities} that advertises support for all formats of a given type using
-   * a provided support value. For any format that does not have the given track type,
-   * {@link #supportsFormat(Format)} will return {@link #FORMAT_UNSUPPORTED_TYPE}.
+   * Returns {@link Parameters} suitable for simple round trip equality tests.
+   *
+   * <p>Primitive variables are set to different values (to the extent that this is possible), to
+   * increase the probability of such tests failing if they accidentally compare mismatched
+   * variables.
+   */
+  private static Parameters buildParametersForEqualsTest() {
+    SparseArray<Map<TrackGroupArray, SelectionOverride>> selectionOverrides = new SparseArray<>();
+    Map<TrackGroupArray, SelectionOverride> videoOverrides = new HashMap<>();
+    videoOverrides.put(new TrackGroupArray(VIDEO_TRACK_GROUP), new SelectionOverride(0, 1));
+    selectionOverrides.put(2, videoOverrides);
+
+    SparseBooleanArray rendererDisabledFlags = new SparseBooleanArray();
+    rendererDisabledFlags.put(3, true);
+
+    return new Parameters(
+        // Video
+        /* maxVideoWidth= */ 0,
+        /* maxVideoHeight= */ 1,
+        /* maxVideoFrameRate= */ 2,
+        /* maxVideoBitrate= */ 3,
+        /* minVideoWidth= */ 4,
+        /* minVideoHeight= */ 5,
+        /* minVideoFrameRate= */ 6,
+        /* minVideoBitrate= */ 7,
+        /* exceedVideoConstraintsIfNecessary= */ false,
+        /* allowVideoMixedMimeTypeAdaptiveness= */ true,
+        /* allowVideoNonSeamlessAdaptiveness= */ false,
+        /* viewportWidth= */ 8,
+        /* viewportHeight= */ 9,
+        /* viewportOrientationMayChange= */ true,
+        // Audio
+        /* preferredAudioLanguages= */ ImmutableList.of("zh", "jp"),
+        /* maxAudioChannelCount= */ 10,
+        /* maxAudioBitrate= */ 11,
+        /* exceedAudioConstraintsIfNecessary= */ false,
+        /* allowAudioMixedMimeTypeAdaptiveness= */ true,
+        /* allowAudioMixedSampleRateAdaptiveness= */ false,
+        /* allowAudioMixedChannelCountAdaptiveness= */ true,
+        // Text
+        /* preferredTextLanguages= */ ImmutableList.of("de", "en"),
+        /* preferredTextRoleFlags= */ C.ROLE_FLAG_CAPTION,
+        /* selectUndeterminedTextLanguage= */ true,
+        /* disabledTextTrackSelectionFlags= */ C.SELECTION_FLAG_AUTOSELECT,
+        // General
+        /* forceLowestBitrate= */ false,
+        /* forceHighestSupportedBitrate= */ true,
+        /* exceedRendererCapabilitiesIfNecessary= */ false,
+        /* tunnelingAudioSessionId= */ 13,
+        // Overrides
+        selectionOverrides,
+        rendererDisabledFlags);
+  }
+
+  /**
+   * A {@link RendererCapabilities} that advertises support for all formats of a given type using a
+   * provided support value. For any format that does not have the given track type, {@link
+   * #supportsFormat(Format)} will return {@link C#FORMAT_UNSUPPORTED_TYPE}.
    */
   private static final class FakeRendererCapabilities implements RendererCapabilities {
 
@@ -1562,7 +1588,7 @@ public final class DefaultTrackSelectorTest {
     public int supportsFormat(Format format) {
       return MimeTypes.getTrackType(format.sampleMimeType) == trackType
           ? supportValue
-          : RendererCapabilities.create(FORMAT_UNSUPPORTED_TYPE);
+          : RendererCapabilities.create(C.FORMAT_UNSUPPORTED_TYPE);
     }
 
     @Override
@@ -1588,8 +1614,8 @@ public final class DefaultTrackSelectorTest {
      *
      * @param trackType the track type to be returned for {@link #getTrackType()}
      * @param formatToCapability a map of (format id, support level) that will be used to return
-     * support level for any given format. For any format that's not in the map,
-     * {@link #supportsFormat(Format)} will return {@link #FORMAT_UNSUPPORTED_TYPE}.
+     *     support level for any given format. For any format that's not in the map, {@link
+     *     #supportsFormat(Format)} will return {@link C#FORMAT_UNSUPPORTED_TYPE}.
      */
     FakeMappedRendererCapabilities(int trackType, Map<String, Integer> formatToCapability) {
       this.trackType = trackType;
@@ -1611,7 +1637,7 @@ public final class DefaultTrackSelectorTest {
     public int supportsFormat(Format format) {
       return format.id != null && formatToCapability.containsKey(format.id)
           ? formatToCapability.get(format.id)
-          : RendererCapabilities.create(FORMAT_UNSUPPORTED_TYPE);
+          : RendererCapabilities.create(C.FORMAT_UNSUPPORTED_TYPE);
     }
 
     @Override

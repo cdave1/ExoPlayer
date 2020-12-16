@@ -22,7 +22,9 @@ import android.media.AudioManager;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import androidx.annotation.IntDef;
+import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
+import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.Util;
 import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
@@ -59,9 +61,10 @@ public final class C {
    */
   public static final int POSITION_UNSET = -1;
 
-  /**
-   * Represents an unset or unknown length.
-   */
+  /** Represents an unset or unknown rate. */
+  public static final float RATE_UNSET = -Float.MAX_VALUE;
+
+  /** Represents an unset or unknown length. */
   public static final int LENGTH_UNSET = -1;
 
   /** Represents an unset or unknown percentage. */
@@ -85,23 +88,34 @@ public final class C {
   public static final int BYTES_PER_FLOAT = 4;
 
   /**
-   * The name of the ASCII charset.
+   * @deprecated Use {@link java.nio.charset.StandardCharsets} or {@link
+   *     com.google.common.base.Charsets} instead.
    */
-  public static final String ASCII_NAME = "US-ASCII";
+  @Deprecated public static final String ASCII_NAME = "US-ASCII";
 
   /**
-   * The name of the UTF-8 charset.
+   * @deprecated Use {@link java.nio.charset.StandardCharsets} or {@link
+   *     com.google.common.base.Charsets} instead.
    */
-  public static final String UTF8_NAME = "UTF-8";
+  @Deprecated public static final String UTF8_NAME = "UTF-8";
 
-  /** The name of the ISO-8859-1 charset. */
-  public static final String ISO88591_NAME = "ISO-8859-1";
+  /**
+   * @deprecated Use {@link java.nio.charset.StandardCharsets} or {@link
+   *     com.google.common.base.Charsets} instead.
+   */
+  @Deprecated public static final String ISO88591_NAME = "ISO-8859-1";
 
-  /** The name of the UTF-16 charset. */
-  public static final String UTF16_NAME = "UTF-16";
+  /**
+   * @deprecated Use {@link java.nio.charset.StandardCharsets} or {@link
+   *     com.google.common.base.Charsets} instead.
+   */
+  @Deprecated public static final String UTF16_NAME = "UTF-16";
 
-  /** The name of the UTF-16 little-endian charset. */
-  public static final String UTF16LE_NAME = "UTF-16LE";
+  /**
+   * @deprecated Use {@link java.nio.charset.StandardCharsets} or {@link
+   *     com.google.common.base.Charsets} instead.
+   */
+  @Deprecated public static final String UTF16LE_NAME = "UTF-16LE";
 
   /**
    * The name of the serif font family.
@@ -165,6 +179,7 @@ public final class C {
     ENCODING_AAC_HE_V2,
     ENCODING_AAC_XHE,
     ENCODING_AAC_ELD,
+    ENCODING_AAC_ER_BSAC,
     ENCODING_AC3,
     ENCODING_E_AC3,
     ENCODING_E_AC3_JOC,
@@ -220,6 +235,8 @@ public final class C {
   public static final int ENCODING_AAC_XHE = AudioFormat.ENCODING_AAC_XHE;
   /** @see AudioFormat#ENCODING_AAC_ELD */
   public static final int ENCODING_AAC_ELD = AudioFormat.ENCODING_AAC_ELD;
+  /** AAC Error Resilient Bit-Sliced Arithmetic Coding. */
+  public static final int ENCODING_AAC_ER_BSAC = 0x40000000;
   /** @see AudioFormat#ENCODING_AC3 */
   public static final int ENCODING_AC3 = AudioFormat.ENCODING_AC3;
   /** @see AudioFormat#ENCODING_E_AC3 */
@@ -238,8 +255,7 @@ public final class C {
   /**
    * Stream types for an {@link android.media.AudioTrack}. One of {@link #STREAM_TYPE_ALARM}, {@link
    * #STREAM_TYPE_DTMF}, {@link #STREAM_TYPE_MUSIC}, {@link #STREAM_TYPE_NOTIFICATION}, {@link
-   * #STREAM_TYPE_RING}, {@link #STREAM_TYPE_SYSTEM}, {@link #STREAM_TYPE_VOICE_CALL} or {@link
-   * #STREAM_TYPE_USE_DEFAULT}.
+   * #STREAM_TYPE_RING}, {@link #STREAM_TYPE_SYSTEM} or {@link #STREAM_TYPE_VOICE_CALL}.
    */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -250,8 +266,7 @@ public final class C {
     STREAM_TYPE_NOTIFICATION,
     STREAM_TYPE_RING,
     STREAM_TYPE_SYSTEM,
-    STREAM_TYPE_VOICE_CALL,
-    STREAM_TYPE_USE_DEFAULT
+    STREAM_TYPE_VOICE_CALL
   })
   public @interface StreamType {}
   /**
@@ -282,13 +297,7 @@ public final class C {
    * @see AudioManager#STREAM_VOICE_CALL
    */
   public static final int STREAM_TYPE_VOICE_CALL = AudioManager.STREAM_VOICE_CALL;
-  /**
-   * @see AudioManager#USE_DEFAULT_STREAM_TYPE
-   */
-  public static final int STREAM_TYPE_USE_DEFAULT = AudioManager.USE_DEFAULT_STREAM_TYPE;
-  /**
-   * The default stream type used by audio renderers.
-   */
+  /** The default stream type used by audio renderers. Equal to {@link #STREAM_TYPE_MUSIC}. */
   public static final int STREAM_TYPE_DEFAULT = STREAM_TYPE_MUSIC;
 
   /**
@@ -548,22 +557,22 @@ public final class C {
   //     ../../../../../../../../../extensions/vp9/src/main/jni/vpx_jni.cc
   // )
 
-  /** @deprecated Use {@code Renderer.VideoScalingMode}. */
+  /**
+   * Video scaling modes for {@link MediaCodec}-based renderers. One of {@link
+   * #VIDEO_SCALING_MODE_SCALE_TO_FIT} or {@link #VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING}.
+   */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
   @IntDef(value = {VIDEO_SCALING_MODE_SCALE_TO_FIT, VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING})
-  @Deprecated
   public @interface VideoScalingMode {}
-  /** @deprecated Use {@code Renderer.VIDEO_SCALING_MODE_SCALE_TO_FIT}. */
-  @Deprecated
+  /** See {@link MediaCodec#VIDEO_SCALING_MODE_SCALE_TO_FIT}. */
   public static final int VIDEO_SCALING_MODE_SCALE_TO_FIT =
       MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT;
-  /** @deprecated Use {@code Renderer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING}. */
-  @Deprecated
+  /** See {@link MediaCodec#VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING}. */
   public static final int VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING =
       MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING;
-  /** @deprecated Use {@code Renderer.VIDEO_SCALING_MODE_DEFAULT}. */
-  @Deprecated public static final int VIDEO_SCALING_MODE_DEFAULT = VIDEO_SCALING_MODE_SCALE_TO_FIT;
+  /** A default video scaling mode for {@link MediaCodec}-based renderers. */
+  public static final int VIDEO_SCALING_MODE_DEFAULT = VIDEO_SCALING_MODE_SCALE_TO_FIT;
 
   /**
    * Track selection flags. Possible flag values are {@link #SELECTION_FLAG_DEFAULT}, {@link
@@ -671,12 +680,14 @@ public final class C {
   public static final int TRACK_TYPE_VIDEO = 2;
   /** A type constant for text tracks. */
   public static final int TRACK_TYPE_TEXT = 3;
+  /** A type constant for image tracks. */
+  public static final int TRACK_TYPE_IMAGE = 4;
   /** A type constant for metadata tracks. */
-  public static final int TRACK_TYPE_METADATA = 4;
+  public static final int TRACK_TYPE_METADATA = 5;
   /** A type constant for camera motion tracks. */
-  public static final int TRACK_TYPE_CAMERA_MOTION = 5;
-  /** A type constant for a dummy or empty track. */
-  public static final int TRACK_TYPE_NONE = 6;
+  public static final int TRACK_TYPE_CAMERA_MOTION = 6;
+  /** A type constant for a fake or empty track. */
+  public static final int TRACK_TYPE_NONE = 7;
   /**
    * Applications or extensions may define custom {@code TRACK_TYPE_*} constants greater than or
    * equal to this value.
@@ -963,7 +974,7 @@ public final class C {
 
   /**
    * Mode specifying whether the player should hold a WakeLock and a WifiLock. One of {@link
-   * #WAKE_MODE_NONE}, {@link #WAKE_MODE_LOCAL} and {@link #WAKE_MODE_NETWORK}.
+   * #WAKE_MODE_NONE}, {@link #WAKE_MODE_LOCAL} or {@link #WAKE_MODE_NETWORK}.
    */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -1069,9 +1080,81 @@ public final class C {
   /** Indicates the track is intended for trick play. */
   public static final int ROLE_FLAG_TRICK_PLAY = 1 << 14;
 
+  // TODO(b/172315872) Move usage back to Player.RepeatMode when Player is moved in common.
   /**
-   * Converts a time in microseconds to the corresponding time in milliseconds, preserving
-   * {@link #TIME_UNSET} and {@link #TIME_END_OF_SOURCE} values.
+   * Repeat modes for playback. One of {@link #REPEAT_MODE_OFF}, {@link #REPEAT_MODE_ONE} or {@link
+   * #REPEAT_MODE_ALL}.
+   */
+  @Documented
+  @Retention(RetentionPolicy.SOURCE)
+  @IntDef({REPEAT_MODE_OFF, REPEAT_MODE_ONE, REPEAT_MODE_ALL})
+  static @interface RepeatMode {}
+
+  /** Normal playback without repetition. */
+  /* package */ static final int REPEAT_MODE_OFF = 0;
+  /** "Repeat One" mode to repeat the currently playing window infinitely. */
+  /* package */ static final int REPEAT_MODE_ONE = 1;
+  /** "Repeat All" mode to repeat the entire timeline infinitely. */
+  /* package */ static final int REPEAT_MODE_ALL = 2;
+
+  /**
+   * Level of renderer support for a format. One of {@link #FORMAT_HANDLED}, {@link
+   * #FORMAT_EXCEEDS_CAPABILITIES}, {@link #FORMAT_UNSUPPORTED_DRM}, {@link
+   * #FORMAT_UNSUPPORTED_SUBTYPE} or {@link #FORMAT_UNSUPPORTED_TYPE}.
+   */
+  @Documented
+  @Retention(RetentionPolicy.SOURCE)
+  @IntDef({
+    FORMAT_HANDLED,
+    FORMAT_EXCEEDS_CAPABILITIES,
+    FORMAT_UNSUPPORTED_DRM,
+    FORMAT_UNSUPPORTED_SUBTYPE,
+    FORMAT_UNSUPPORTED_TYPE
+  })
+  public static @interface FormatSupport {}
+  // TODO(b/172315872) Renderer was a link. Link to equivalent concept or remove @code.
+  /** The {@code Renderer} is capable of rendering the format. */
+  public static final int FORMAT_HANDLED = 0b100;
+  /**
+   * The {@code Renderer} is capable of rendering formats with the same MIME type, but the
+   * properties of the format exceed the renderer's capabilities. There is a chance the renderer
+   * will be able to play the format in practice because some renderers report their capabilities
+   * conservatively, but the expected outcome is that playback will fail.
+   *
+   * <p>Example: The {@code Renderer} is capable of rendering H264 and the format's MIME type is
+   * {@code MimeTypes#VIDEO_H264}, but the format's resolution exceeds the maximum limit supported
+   * by the underlying H264 decoder.
+   */
+  public static final int FORMAT_EXCEEDS_CAPABILITIES = 0b011;
+  /**
+   * The {@code Renderer} is capable of rendering formats with the same MIME type, but is not
+   * capable of rendering the format because the format's drm protection is not supported.
+   *
+   * <p>Example: The {@code Renderer} is capable of rendering H264 and the format's MIME type is
+   * {@link MimeTypes#VIDEO_H264}, but the format indicates PlayReady drm protection whereas the
+   * renderer only supports Widevine.
+   */
+  public static final int FORMAT_UNSUPPORTED_DRM = 0b010;
+  /**
+   * The {@code Renderer} is a general purpose renderer for formats of the same top-level type, but
+   * is not capable of rendering the format or any other format with the same MIME type because the
+   * sub-type is not supported.
+   *
+   * <p>Example: The {@code Renderer} is a general purpose audio renderer and the format's MIME type
+   * matches audio/[subtype], but there does not exist a suitable decoder for [subtype].
+   */
+  public static final int FORMAT_UNSUPPORTED_SUBTYPE = 0b001;
+  /**
+   * The {@code Renderer} is not capable of rendering the format, either because it does not support
+   * the format's top-level type, or because it's a specialized renderer for a different MIME type.
+   *
+   * <p>Example: The {@code Renderer} is a general purpose video renderer, but the format has an
+   * audio MIME type.
+   */
+  public static final int FORMAT_UNSUPPORTED_TYPE = 0b000;
+  /**
+   * Converts a time in microseconds to the corresponding time in milliseconds, preserving {@link
+   * #TIME_UNSET} and {@link #TIME_END_OF_SOURCE} values.
    *
    * @param timeUs The time in microseconds.
    * @return The corresponding time in milliseconds.
@@ -1099,8 +1182,31 @@ public final class C {
    */
   @RequiresApi(21)
   public static int generateAudioSessionIdV21(Context context) {
-    return ((AudioManager) context.getSystemService(Context.AUDIO_SERVICE))
-        .generateAudioSessionId();
+    @Nullable
+    AudioManager audioManager = ((AudioManager) context.getSystemService(Context.AUDIO_SERVICE));
+    return audioManager == null ? AudioManager.ERROR : audioManager.generateAudioSessionId();
   }
 
+  /**
+   * Returns string representation of a {@link FormatSupport} flag.
+   *
+   * @param formatSupport A {@link FormatSupport} flag.
+   * @return A string representation of the flag.
+   */
+  public static String getFormatSupportString(@FormatSupport int formatSupport) {
+    switch (formatSupport) {
+      case FORMAT_HANDLED:
+        return "YES";
+      case FORMAT_EXCEEDS_CAPABILITIES:
+        return "NO_EXCEEDS_CAPABILITIES";
+      case FORMAT_UNSUPPORTED_DRM:
+        return "NO_UNSUPPORTED_DRM";
+      case FORMAT_UNSUPPORTED_SUBTYPE:
+        return "NO_UNSUPPORTED_TYPE";
+      case FORMAT_UNSUPPORTED_TYPE:
+        return "NO";
+      default:
+        throw new IllegalStateException();
+    }
+  }
 }

@@ -23,6 +23,7 @@ import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.SeekParameters;
 import com.google.android.exoplayer2.drm.DrmInitData;
 import com.google.android.exoplayer2.drm.DrmSession;
+import com.google.android.exoplayer2.drm.DrmSessionEventListener;
 import com.google.android.exoplayer2.drm.DrmSessionManager;
 import com.google.android.exoplayer2.extractor.Extractor;
 import com.google.android.exoplayer2.metadata.Metadata;
@@ -46,6 +47,7 @@ import com.google.android.exoplayer2.upstream.TransferListener;
 import com.google.android.exoplayer2.util.Assertions;
 import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.Util;
+import com.google.common.primitives.Ints;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -68,6 +70,7 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
   private final HlsDataSourceFactory dataSourceFactory;
   @Nullable private final TransferListener mediaTransferListener;
   private final DrmSessionManager drmSessionManager;
+  private final DrmSessionEventListener.EventDispatcher drmEventDispatcher;
   private final LoadErrorHandlingPolicy loadErrorHandlingPolicy;
   private final EventDispatcher eventDispatcher;
   private final Allocator allocator;
@@ -86,7 +89,6 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
   // Maps sample stream wrappers to variant/rendition index by matching array positions.
   private int[][] manifestUrlIndicesPerWrapper;
   private SequenceableLoader compositeSequenceableLoader;
-  private boolean notifiedReadingStarted;
 
   /**
    * Creates an HLS media period.
@@ -113,6 +115,7 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
       HlsDataSourceFactory dataSourceFactory,
       @Nullable TransferListener mediaTransferListener,
       DrmSessionManager drmSessionManager,
+      DrmSessionEventListener.EventDispatcher drmEventDispatcher,
       LoadErrorHandlingPolicy loadErrorHandlingPolicy,
       EventDispatcher eventDispatcher,
       Allocator allocator,
@@ -125,6 +128,7 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
     this.dataSourceFactory = dataSourceFactory;
     this.mediaTransferListener = mediaTransferListener;
     this.drmSessionManager = drmSessionManager;
+    this.drmEventDispatcher = drmEventDispatcher;
     this.loadErrorHandlingPolicy = loadErrorHandlingPolicy;
     this.eventDispatcher = eventDispatcher;
     this.allocator = allocator;
@@ -139,7 +143,6 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
     sampleStreamWrappers = new HlsSampleStreamWrapper[0];
     enabledSampleStreamWrappers = new HlsSampleStreamWrapper[0];
     manifestUrlIndicesPerWrapper = new int[0][];
-    eventDispatcher.mediaPeriodCreated();
   }
 
   public void release() {
@@ -148,7 +151,6 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
       sampleStreamWrapper.release();
     }
     callback = null;
-    eventDispatcher.mediaPeriodReleased();
   }
 
   @Override
@@ -376,10 +378,6 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
 
   @Override
   public long readDiscontinuity() {
-    if (!notifiedReadingStarted) {
-      eventDispatcher.readingStarted();
-      notifiedReadingStarted = true;
-    }
     return C.TIME_UNSET;
   }
 
@@ -447,17 +445,20 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
 
   @Override
   public void onPlaylistChanged() {
+    for (HlsSampleStreamWrapper streamWrapper : sampleStreamWrappers) {
+      streamWrapper.onPlaylistUpdated();
+    }
     callback.onContinueLoadingRequested(this);
   }
 
   @Override
-  public boolean onPlaylistError(Uri url, long blacklistDurationMs) {
-    boolean noBlacklistingFailure = true;
+  public boolean onPlaylistError(Uri url, long exclusionDurationMs) {
+    boolean exclusionSucceeded = true;
     for (HlsSampleStreamWrapper streamWrapper : sampleStreamWrappers) {
-      noBlacklistingFailure &= streamWrapper.onPlaylistError(url, blacklistDurationMs);
+      exclusionSucceeded &= streamWrapper.onPlaylistError(url, exclusionDurationMs);
     }
     callback.onContinueLoadingRequested(this);
-    return noBlacklistingFailure;
+    return exclusionSucceeded;
   }
 
   // Internal methods.
@@ -605,6 +606,12 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
       }
     }
     String codecs = selectedPlaylistFormats[0].codecs;
+    int numberOfVideoCodecs = Util.getCodecCountOfType(codecs, C.TRACK_TYPE_VIDEO);
+    int numberOfAudioCodecs = Util.getCodecCountOfType(codecs, C.TRACK_TYPE_AUDIO);
+    boolean codecsStringAllowsChunklessPreparation =
+        numberOfAudioCodecs <= 1
+            && numberOfVideoCodecs <= 1
+            && numberOfAudioCodecs + numberOfVideoCodecs > 0;
     HlsSampleStreamWrapper sampleStreamWrapper =
         buildSampleStreamWrapper(
             C.TRACK_TYPE_DEFAULT,
@@ -616,18 +623,16 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
             positionUs);
     sampleStreamWrappers.add(sampleStreamWrapper);
     manifestUrlIndicesPerWrapper.add(selectedVariantIndices);
-    if (allowChunklessPreparation && codecs != null) {
-      boolean variantsContainVideoCodecs = Util.getCodecsOfType(codecs, C.TRACK_TYPE_VIDEO) != null;
-      boolean variantsContainAudioCodecs = Util.getCodecsOfType(codecs, C.TRACK_TYPE_AUDIO) != null;
+    if (allowChunklessPreparation && codecsStringAllowsChunklessPreparation) {
       List<TrackGroup> muxedTrackGroups = new ArrayList<>();
-      if (variantsContainVideoCodecs) {
+      if (numberOfVideoCodecs > 0) {
         Format[] videoFormats = new Format[selectedVariantsCount];
         for (int i = 0; i < videoFormats.length; i++) {
           videoFormats[i] = deriveVideoFormat(selectedPlaylistFormats[i]);
         }
         muxedTrackGroups.add(new TrackGroup(videoFormats));
 
-        if (variantsContainAudioCodecs
+        if (numberOfAudioCodecs > 0
             && (masterPlaylist.muxedAudioFormat != null || masterPlaylist.audios.isEmpty())) {
           muxedTrackGroups.add(
               new TrackGroup(
@@ -642,7 +647,7 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
             muxedTrackGroups.add(new TrackGroup(ccFormats.get(i)));
           }
         }
-      } else if (variantsContainAudioCodecs) {
+      } else /* numberOfAudioCodecs > 0 */ {
         // Variants only contain audio.
         Format[] audioFormats = new Format[selectedVariantsCount];
         for (int i = 0; i < audioFormats.length; i++) {
@@ -653,9 +658,6 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
                   /* isPrimaryTrackInVariant= */ true);
         }
         muxedTrackGroups.add(new TrackGroup(audioFormats));
-      } else {
-        // Variants contain codecs but no video or audio entries could be identified.
-        throw new IllegalArgumentException("Unexpected codecs attribute: " + codecs);
       }
 
       TrackGroup id3TrackGroup =
@@ -695,7 +697,7 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
         continue;
       }
 
-      boolean renditionsHaveCodecs = true;
+      boolean codecStringsAllowChunklessPreparation = true;
       scratchPlaylistUrls.clear();
       scratchPlaylistFormats.clear();
       scratchIndicesList.clear();
@@ -706,7 +708,8 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
           scratchIndicesList.add(renditionIndex);
           scratchPlaylistUrls.add(rendition.url);
           scratchPlaylistFormats.add(rendition.format);
-          renditionsHaveCodecs &= rendition.format.codecs != null;
+          codecStringsAllowChunklessPreparation &=
+              Util.getCodecCountOfType(rendition.format.codecs, C.TRACK_TYPE_AUDIO) == 1;
         }
       }
 
@@ -719,10 +722,10 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
               /* muxedCaptionFormats= */ Collections.emptyList(),
               overridingDrmInitData,
               positionUs);
-      manifestUrlsIndicesPerWrapper.add(Util.toArray(scratchIndicesList));
+      manifestUrlsIndicesPerWrapper.add(Ints.toArray(scratchIndicesList));
       sampleStreamWrappers.add(sampleStreamWrapper);
 
-      if (allowChunklessPreparation && renditionsHaveCodecs) {
+      if (allowChunklessPreparation && codecStringsAllowChunklessPreparation) {
         Format[] renditionFormats = scratchPlaylistFormats.toArray(new Format[0]);
         sampleStreamWrapper.prepareWithMasterPlaylistInfo(
             new TrackGroup[] {new TrackGroup(renditionFormats)}, /* primaryTrackGroupIndex= */ 0);
@@ -757,6 +760,7 @@ public final class HlsMediaPeriod implements MediaPeriod, HlsSampleStreamWrapper
         positionUs,
         muxedAudioFormat,
         drmSessionManager,
+        drmEventDispatcher,
         loadErrorHandlingPolicy,
         eventDispatcher,
         metadataType);

@@ -15,11 +15,14 @@
  */
 package com.google.android.exoplayer2;
 
+import static java.lang.Math.max;
+import static java.lang.Math.min;
+
 /** Default {@link ControlDispatcher}. */
 public class DefaultControlDispatcher implements ControlDispatcher {
 
   /** The default fast forward increment, in milliseconds. */
-  public static final int DEFAULT_FAST_FORWARD_MS = 15000;
+  public static final int DEFAULT_FAST_FORWARD_MS = 15_000;
   /** The default rewind increment, in milliseconds. */
   public static final int DEFAULT_REWIND_MS = 5000;
 
@@ -47,6 +50,12 @@ public class DefaultControlDispatcher implements ControlDispatcher {
     this.fastForwardIncrementMs = fastForwardIncrementMs;
     this.rewindIncrementMs = rewindIncrementMs;
     window = new Timeline.Window();
+  }
+
+  @Override
+  public boolean dispatchPrepare(Player player) {
+    player.prepare();
+    return true;
   }
 
   @Override
@@ -90,7 +99,7 @@ public class DefaultControlDispatcher implements ControlDispatcher {
     int nextWindowIndex = player.getNextWindowIndex();
     if (nextWindowIndex != C.INDEX_UNSET) {
       player.seekTo(nextWindowIndex, C.TIME_UNSET);
-    } else if (timeline.getWindow(windowIndex, window).isLive) {
+    } else if (timeline.getWindow(windowIndex, window).isLive()) {
       player.seekTo(windowIndex, C.TIME_UNSET);
     }
     return true;
@@ -127,6 +136,13 @@ public class DefaultControlDispatcher implements ControlDispatcher {
   @Override
   public boolean dispatchStop(Player player, boolean reset) {
     player.stop(reset);
+    return true;
+  }
+
+  @Override
+  public boolean dispatchSetPlaybackParameters(
+      Player player, PlaybackParameters playbackParameters) {
+    player.setPlaybackParameters(playbackParameters);
     return true;
   }
 
@@ -174,9 +190,9 @@ public class DefaultControlDispatcher implements ControlDispatcher {
     long positionMs = player.getCurrentPosition() + offsetMs;
     long durationMs = player.getDuration();
     if (durationMs != C.TIME_UNSET) {
-      positionMs = Math.min(positionMs, durationMs);
+      positionMs = min(positionMs, durationMs);
     }
-    positionMs = Math.max(positionMs, 0);
+    positionMs = max(positionMs, 0);
     player.seekTo(player.getCurrentWindowIndex(), positionMs);
   }
 }

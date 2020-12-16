@@ -15,16 +15,19 @@
  */
 package com.google.android.exoplayer2.trackselection;
 
+import static java.lang.Math.max;
+import static java.lang.Math.min;
+
 import android.util.Pair;
 import androidx.annotation.IntDef;
 import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
+import com.google.android.exoplayer2.C.FormatSupport;
 import com.google.android.exoplayer2.ExoPlaybackException;
 import com.google.android.exoplayer2.Renderer;
 import com.google.android.exoplayer2.RendererCapabilities;
 import com.google.android.exoplayer2.RendererCapabilities.AdaptiveSupport;
 import com.google.android.exoplayer2.RendererCapabilities.Capabilities;
-import com.google.android.exoplayer2.RendererCapabilities.FormatSupport;
 import com.google.android.exoplayer2.RendererConfiguration;
 import com.google.android.exoplayer2.Timeline;
 import com.google.android.exoplayer2.source.MediaSource.MediaPeriodId;
@@ -68,23 +71,22 @@ public abstract class MappingTrackSelector extends TrackSelector {
     public static final int RENDERER_SUPPORT_NO_TRACKS = 0;
     /**
      * The renderer has tracks mapped to it, but all are unsupported. In other words, {@link
-     * #getTrackSupport(int, int, int)} returns {@link RendererCapabilities#FORMAT_UNSUPPORTED_DRM},
-     * {@link RendererCapabilities#FORMAT_UNSUPPORTED_SUBTYPE} or {@link
-     * RendererCapabilities#FORMAT_UNSUPPORTED_TYPE} for all tracks mapped to the renderer.
+     * #getTrackSupport(int, int, int)} returns {@link C#FORMAT_UNSUPPORTED_DRM}, {@link
+     * C#FORMAT_UNSUPPORTED_SUBTYPE} or {@link C#FORMAT_UNSUPPORTED_TYPE} for all tracks mapped to
+     * the renderer.
      */
     public static final int RENDERER_SUPPORT_UNSUPPORTED_TRACKS = 1;
     /**
      * The renderer has tracks mapped to it and at least one is of a supported type, but all such
      * tracks exceed the renderer's capabilities. In other words, {@link #getTrackSupport(int, int,
-     * int)} returns {@link RendererCapabilities#FORMAT_EXCEEDS_CAPABILITIES} for at least one
-     * track mapped to the renderer, but does not return {@link
-     * RendererCapabilities#FORMAT_HANDLED} for any tracks mapped to the renderer.
+     * int)} returns {@link C#FORMAT_EXCEEDS_CAPABILITIES} for at least one track mapped to the
+     * renderer, but does not return {@link C#FORMAT_HANDLED} for any tracks mapped to the renderer.
      */
     public static final int RENDERER_SUPPORT_EXCEEDS_CAPABILITIES_TRACKS = 2;
     /**
      * The renderer has tracks mapped to it, and at least one such track is playable. In other
-     * words, {@link #getTrackSupport(int, int, int)} returns {@link
-     * RendererCapabilities#FORMAT_HANDLED} for at least one track mapped to the renderer.
+     * words, {@link #getTrackSupport(int, int, int)} returns {@link C#FORMAT_HANDLED} for at least
+     * one track mapped to the renderer.
      */
     public static final int RENDERER_SUPPORT_PLAYABLE_TRACKS = 3;
 
@@ -178,20 +180,20 @@ public abstract class MappingTrackSelector extends TrackSelector {
         for (@Capabilities int trackFormatSupport : trackGroupFormatSupport) {
           int trackRendererSupport;
           switch (RendererCapabilities.getFormatSupport(trackFormatSupport)) {
-            case RendererCapabilities.FORMAT_HANDLED:
+            case C.FORMAT_HANDLED:
               return RENDERER_SUPPORT_PLAYABLE_TRACKS;
-            case RendererCapabilities.FORMAT_EXCEEDS_CAPABILITIES:
+            case C.FORMAT_EXCEEDS_CAPABILITIES:
               trackRendererSupport = RENDERER_SUPPORT_EXCEEDS_CAPABILITIES_TRACKS;
               break;
-            case RendererCapabilities.FORMAT_UNSUPPORTED_TYPE:
-            case RendererCapabilities.FORMAT_UNSUPPORTED_SUBTYPE:
-            case RendererCapabilities.FORMAT_UNSUPPORTED_DRM:
+            case C.FORMAT_UNSUPPORTED_TYPE:
+            case C.FORMAT_UNSUPPORTED_SUBTYPE:
+            case C.FORMAT_UNSUPPORTED_DRM:
               trackRendererSupport = RENDERER_SUPPORT_UNSUPPORTED_TRACKS;
               break;
             default:
               throw new IllegalStateException();
           }
-          bestRendererSupport = Math.max(bestRendererSupport, trackRendererSupport);
+          bestRendererSupport = max(bestRendererSupport, trackRendererSupport);
         }
       }
       return bestRendererSupport;
@@ -218,7 +220,7 @@ public abstract class MappingTrackSelector extends TrackSelector {
       @RendererSupport int bestRendererSupport = RENDERER_SUPPORT_NO_TRACKS;
       for (int i = 0; i < rendererCount; i++) {
         if (rendererTrackTypes[i] == trackType) {
-          bestRendererSupport = Math.max(bestRendererSupport, getRendererSupport(i));
+          bestRendererSupport = max(bestRendererSupport, getRendererSupport(i));
         }
       }
       return bestRendererSupport;
@@ -249,14 +251,12 @@ public abstract class MappingTrackSelector extends TrackSelector {
      * Returns the extent to which a renderer supports adaptation between supported tracks in a
      * specified {@link TrackGroup}.
      *
-     * <p>Tracks for which {@link #getTrackSupport(int, int, int)} returns {@link
-     * RendererCapabilities#FORMAT_HANDLED} are always considered. Tracks for which {@link
-     * #getTrackSupport(int, int, int)} returns {@link
-     * RendererCapabilities#FORMAT_EXCEEDS_CAPABILITIES} are also considered if {@code
+     * <p>Tracks for which {@link #getTrackSupport(int, int, int)} returns {@link C#FORMAT_HANDLED}
+     * are always considered. Tracks for which {@link #getTrackSupport(int, int, int)} returns
+     * {@link C#FORMAT_EXCEEDS_CAPABILITIES} are also considered if {@code
      * includeCapabilitiesExceededTracks} is set to {@code true}. Tracks for which {@link
-     * #getTrackSupport(int, int, int)} returns {@link RendererCapabilities#FORMAT_UNSUPPORTED_DRM},
-     * {@link RendererCapabilities#FORMAT_UNSUPPORTED_TYPE} or {@link
-     * RendererCapabilities#FORMAT_UNSUPPORTED_SUBTYPE} are never considered.
+     * #getTrackSupport(int, int, int)} returns {@link C#FORMAT_UNSUPPORTED_DRM}, {@link
+     * C#FORMAT_UNSUPPORTED_TYPE} or {@link C#FORMAT_UNSUPPORTED_SUBTYPE} are never considered.
      *
      * @param rendererIndex The renderer index.
      * @param groupIndex The index of the track group.
@@ -273,9 +273,9 @@ public abstract class MappingTrackSelector extends TrackSelector {
       int trackIndexCount = 0;
       for (int i = 0; i < trackCount; i++) {
         @FormatSupport int fixedSupport = getTrackSupport(rendererIndex, groupIndex, i);
-        if (fixedSupport == RendererCapabilities.FORMAT_HANDLED
+        if (fixedSupport == C.FORMAT_HANDLED
             || (includeCapabilitiesExceededTracks
-            && fixedSupport == RendererCapabilities.FORMAT_EXCEEDS_CAPABILITIES)) {
+                && fixedSupport == C.FORMAT_EXCEEDS_CAPABILITIES)) {
           trackIndices[trackIndexCount++] = i;
         }
       }
@@ -307,13 +307,13 @@ public abstract class MappingTrackSelector extends TrackSelector {
           multipleMimeTypes |= !Util.areEqual(firstSampleMimeType, sampleMimeType);
         }
         adaptiveSupport =
-            Math.min(
+            min(
                 adaptiveSupport,
                 RendererCapabilities.getAdaptiveSupport(
                     rendererFormatSupports[rendererIndex][groupIndex][i]));
       }
       return multipleMimeTypes
-          ? Math.min(adaptiveSupport, rendererMixedMimeTypeAdaptiveSupports[rendererIndex])
+          ? min(adaptiveSupport, rendererMixedMimeTypeAdaptiveSupports[rendererIndex])
           : adaptiveSupport;
     }
 
@@ -336,14 +336,15 @@ public abstract class MappingTrackSelector extends TrackSelector {
    * Returns the mapping information for the currently active track selection, or null if no
    * selection is currently active.
    */
-  public final @Nullable MappedTrackInfo getCurrentMappedTrackInfo() {
+  @Nullable
+  public final MappedTrackInfo getCurrentMappedTrackInfo() {
     return currentMappedTrackInfo;
   }
 
   // TrackSelector implementation.
 
   @Override
-  public final void onSelectionActivated(Object info) {
+  public final void onSelectionActivated(@Nullable Object info) {
     currentMappedTrackInfo = (MappedTrackInfo) info;
   }
 
@@ -351,7 +352,7 @@ public abstract class MappingTrackSelector extends TrackSelector {
   public final TrackSelectorResult selectTracks(
       RendererCapabilities[] rendererCapabilities,
       TrackGroupArray trackGroups,
-      MediaPeriodId periodId,
+      MediaPeriodId mediaPeriodId,
       Timeline timeline)
       throws ExoPlaybackException {
     // Structures into which data will be written during the selection. The extra item at the end
@@ -427,7 +428,11 @@ public abstract class MappingTrackSelector extends TrackSelector {
 
     Pair<@NullableType RendererConfiguration[], @NullableType TrackSelection[]> result =
         selectTracks(
-            mappedTrackInfo, rendererFormatSupports, rendererMixedMimeTypeAdaptationSupports);
+            mappedTrackInfo,
+            rendererFormatSupports,
+            rendererMixedMimeTypeAdaptationSupports,
+            mediaPeriodId,
+            timeline);
     return new TrackSelectorResult(result.first, result.second, mappedTrackInfo);
   }
 
@@ -439,6 +444,9 @@ public abstract class MappingTrackSelector extends TrackSelector {
    *     renderer, track group and track (in that order).
    * @param rendererMixedMimeTypeAdaptationSupport The {@link AdaptiveSupport} for mixed MIME type
    *     adaptation for the renderer.
+   * @param mediaPeriodId The {@link MediaPeriodId} of the period for which tracks are to be
+   *     selected.
+   * @param timeline The {@link Timeline} holding the period for which tracks are to be selected.
    * @return A pair consisting of the track selections and configurations for each renderer. A null
    *     configuration indicates the renderer should be disabled, in which case the track selection
    *     will also be null. A track selection may also be null for a non-disabled renderer if {@link
@@ -449,17 +457,17 @@ public abstract class MappingTrackSelector extends TrackSelector {
       selectTracks(
           MappedTrackInfo mappedTrackInfo,
           @Capabilities int[][][] rendererFormatSupports,
-          @AdaptiveSupport int[] rendererMixedMimeTypeAdaptationSupport)
+          @AdaptiveSupport int[] rendererMixedMimeTypeAdaptationSupport,
+          MediaPeriodId mediaPeriodId,
+          Timeline timeline)
           throws ExoPlaybackException;
 
   /**
    * Finds the renderer to which the provided {@link TrackGroup} should be mapped.
    *
    * <p>A {@link TrackGroup} is mapped to the renderer that reports the highest of (listed in
-   * decreasing order of support) {@link RendererCapabilities#FORMAT_HANDLED}, {@link
-   * RendererCapabilities#FORMAT_EXCEEDS_CAPABILITIES}, {@link
-   * RendererCapabilities#FORMAT_UNSUPPORTED_DRM} and {@link
-   * RendererCapabilities#FORMAT_UNSUPPORTED_SUBTYPE}.
+   * decreasing order of support) {@link C#FORMAT_HANDLED}, {@link C#FORMAT_EXCEEDS_CAPABILITIES},
+   * {@link C#FORMAT_UNSUPPORTED_DRM} and {@link C#FORMAT_UNSUPPORTED_SUBTYPE}.
    *
    * <p>In the case that two or more renderers report the same level of support, the assignment
    * depends on {@code preferUnassociatedRenderer}.
@@ -472,9 +480,9 @@ public abstract class MappingTrackSelector extends TrackSelector {
    *       available renderers have already mapped track groups.
    * </ul>
    *
-   * <p>If all renderers report {@link RendererCapabilities#FORMAT_UNSUPPORTED_TYPE} for all of the
-   * tracks in the group, then {@code renderers.length} is returned to indicate that the group was
-   * not mapped to any renderer.
+   * <p>If all renderers report {@link C#FORMAT_UNSUPPORTED_TYPE} for all of the tracks in the
+   * group, then {@code renderers.length} is returned to indicate that the group was not mapped to
+   * any renderer.
    *
    * @param rendererCapabilities The {@link RendererCapabilities} of the renderers.
    * @param group The track group to map to a renderer.
@@ -492,17 +500,17 @@ public abstract class MappingTrackSelector extends TrackSelector {
       boolean preferUnassociatedRenderer)
       throws ExoPlaybackException {
     int bestRendererIndex = rendererCapabilities.length;
-    @FormatSupport int bestFormatSupportLevel = RendererCapabilities.FORMAT_UNSUPPORTED_TYPE;
+    @FormatSupport int bestFormatSupportLevel = C.FORMAT_UNSUPPORTED_TYPE;
     boolean bestRendererIsUnassociated = true;
     for (int rendererIndex = 0; rendererIndex < rendererCapabilities.length; rendererIndex++) {
       RendererCapabilities rendererCapability = rendererCapabilities[rendererIndex];
-      @FormatSupport int formatSupportLevel = RendererCapabilities.FORMAT_UNSUPPORTED_TYPE;
+      @FormatSupport int formatSupportLevel = C.FORMAT_UNSUPPORTED_TYPE;
       for (int trackIndex = 0; trackIndex < group.length; trackIndex++) {
         @FormatSupport
         int trackFormatSupportLevel =
             RendererCapabilities.getFormatSupport(
                 rendererCapability.supportsFormat(group.getFormat(trackIndex)));
-        formatSupportLevel = Math.max(formatSupportLevel, trackFormatSupportLevel);
+        formatSupportLevel = max(formatSupportLevel, trackFormatSupportLevel);
       }
       boolean rendererIsUnassociated = rendererTrackGroupCounts[rendererIndex] == 0;
       if (formatSupportLevel > bestFormatSupportLevel

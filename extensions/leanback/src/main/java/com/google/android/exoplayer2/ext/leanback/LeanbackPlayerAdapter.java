@@ -72,16 +72,21 @@ public final class LeanbackPlayerAdapter extends PlayerAdapter implements Runnab
     this.context = context;
     this.player = player;
     this.updatePeriodMs = updatePeriodMs;
-    handler = Util.createHandler();
+    handler = Util.createHandlerForCurrentOrMainLooper();
     componentListener = new ComponentListener();
     controlDispatcher = new DefaultControlDispatcher();
   }
 
   /**
-   * Sets the {@link PlaybackPreparer}.
-   *
-   * @param playbackPreparer The {@link PlaybackPreparer}.
+   * @deprecated Use {@link #setControlDispatcher(ControlDispatcher)} instead. The adapter calls
+   *     {@link ControlDispatcher#dispatchPrepare(Player)} instead of {@link
+   *     PlaybackPreparer#preparePlayback()}. The {@link DefaultControlDispatcher} that the adapter
+   *     uses by default, calls {@link Player#prepare()}. If you wish to customize this behaviour,
+   *     you can provide a custom implementation of {@link
+   *     ControlDispatcher#dispatchPrepare(Player)}.
    */
+  @SuppressWarnings("deprecation")
+  @Deprecated
   public void setPlaybackPreparer(@Nullable PlaybackPreparer playbackPreparer) {
     this.playbackPreparer = playbackPreparer;
   }
@@ -167,11 +172,15 @@ public final class LeanbackPlayerAdapter extends PlayerAdapter implements Runnab
     return player.getPlaybackState() == Player.STATE_IDLE ? -1 : player.getCurrentPosition();
   }
 
+  // Calls deprecated method to provide backwards compatibility.
+  @SuppressWarnings("deprecation")
   @Override
   public void play() {
     if (player.getPlaybackState() == Player.STATE_IDLE) {
       if (playbackPreparer != null) {
         playbackPreparer.preparePlayback();
+      } else {
+        controlDispatcher.dispatchPrepare(player);
       }
     } else if (player.getPlaybackState() == Player.STATE_ENDED) {
       controlDispatcher.dispatchSeekTo(player, player.getCurrentWindowIndex(), C.TIME_UNSET);

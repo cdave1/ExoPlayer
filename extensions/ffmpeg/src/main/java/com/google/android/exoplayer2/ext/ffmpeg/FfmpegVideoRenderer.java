@@ -15,6 +15,10 @@
  */
 package com.google.android.exoplayer2.ext.ffmpeg;
 
+import static com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.DISCARD_REASON_MIME_TYPE_CHANGED;
+import static com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.REUSE_RESULT_NO;
+import static com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.REUSE_RESULT_YES_WITHOUT_RECONFIGURATION;
+
 import android.os.Handler;
 import android.view.Surface;
 import androidx.annotation.Nullable;
@@ -22,8 +26,10 @@ import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.RendererCapabilities;
 import com.google.android.exoplayer2.decoder.Decoder;
+import com.google.android.exoplayer2.decoder.DecoderReuseEvaluation;
 import com.google.android.exoplayer2.drm.ExoMediaCrypto;
 import com.google.android.exoplayer2.util.TraceUtil;
+import com.google.android.exoplayer2.util.Util;
 import com.google.android.exoplayer2.video.DecoderVideoRenderer;
 import com.google.android.exoplayer2.video.VideoDecoderInputBuffer;
 import com.google.android.exoplayer2.video.VideoDecoderOutputBuffer;
@@ -37,7 +43,7 @@ import com.google.android.exoplayer2.video.VideoRendererEventListener;
  */
 public final class FfmpegVideoRenderer extends DecoderVideoRenderer {
 
-  private static final String TAG = "FfmpegAudioRenderer";
+  private static final String TAG = "FfmpegVideoRenderer";
 
   /**
    * Creates a new instance.
@@ -68,14 +74,14 @@ public final class FfmpegVideoRenderer extends DecoderVideoRenderer {
   @RendererCapabilities.Capabilities
   public final int supportsFormat(Format format) {
     // TODO: Remove this line and uncomment the implementation below.
-    return FORMAT_UNSUPPORTED_TYPE;
+    return C.FORMAT_UNSUPPORTED_TYPE;
     /*
     String mimeType = Assertions.checkNotNull(format.sampleMimeType);
     if (!FfmpegLibrary.isAvailable() || !MimeTypes.isVideo(mimeType)) {
       return FORMAT_UNSUPPORTED_TYPE;
     } else if (!FfmpegLibrary.supportsFormat(format.sampleMimeType)) {
       return RendererCapabilities.create(FORMAT_UNSUPPORTED_SUBTYPE);
-    } else if (format.drmInitData != null && format.exoMediaCryptoType == null) {
+    } else if (format.exoMediaCryptoType != null) {
       return RendererCapabilities.create(FORMAT_UNSUPPORTED_DRM);
     } else {
       return RendererCapabilities.create(
@@ -112,5 +118,18 @@ public final class FfmpegVideoRenderer extends DecoderVideoRenderer {
       decoder.setOutputMode(outputMode);
     }
     */
+  }
+
+  @Override
+  protected DecoderReuseEvaluation canReuseDecoder(
+      String decoderName, Format oldFormat, Format newFormat) {
+    boolean sameMimeType = Util.areEqual(oldFormat.sampleMimeType, newFormat.sampleMimeType);
+    // TODO: Ability to reuse the decoder may be MIME type dependent.
+    return new DecoderReuseEvaluation(
+        decoderName,
+        oldFormat,
+        newFormat,
+        sameMimeType ? REUSE_RESULT_YES_WITHOUT_RECONFIGURATION : REUSE_RESULT_NO,
+        sameMimeType ? 0 : DISCARD_REASON_MIME_TYPE_CHANGED);
   }
 }

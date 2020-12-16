@@ -15,6 +15,9 @@
  */
 package com.google.android.exoplayer2.extractor.ogg;
 
+import static com.google.android.exoplayer2.util.Assertions.checkStateNotNull;
+import static java.lang.Math.min;
+
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.ParserException;
 import com.google.android.exoplayer2.extractor.Extractor;
@@ -23,7 +26,6 @@ import com.google.android.exoplayer2.extractor.ExtractorOutput;
 import com.google.android.exoplayer2.extractor.ExtractorsFactory;
 import com.google.android.exoplayer2.extractor.PositionHolder;
 import com.google.android.exoplayer2.extractor.TrackOutput;
-import com.google.android.exoplayer2.util.Assertions;
 import com.google.android.exoplayer2.util.ParsableByteArray;
 import java.io.IOException;
 import org.checkerframework.checker.nullness.qual.EnsuresNonNullIf;
@@ -71,7 +73,7 @@ public class OggExtractor implements Extractor {
 
   @Override
   public int read(ExtractorInput input, PositionHolder seekPosition) throws IOException {
-    Assertions.checkStateNotNull(output); // Asserts that init has been called.
+    checkStateNotNull(output); // Check that init has been called.
     if (streamReader == null) {
       if (!sniffInternal(input)) {
         throw new ParserException("Failed to determine bitstream type");
@@ -94,9 +96,9 @@ public class OggExtractor implements Extractor {
       return false;
     }
 
-    int length = Math.min(header.bodySize, MAX_VERIFICATION_BYTES);
+    int length = min(header.bodySize, MAX_VERIFICATION_BYTES);
     ParsableByteArray scratch = new ParsableByteArray(length);
-    input.peekFully(scratch.data, 0, length);
+    input.peekFully(scratch.getData(), 0, length);
 
     if (FlacReader.verifyBitstreamType(resetPosition(scratch))) {
       streamReader = new FlacReader();

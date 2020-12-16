@@ -15,6 +15,7 @@
  */
 package com.google.android.exoplayer2.ext.vp9;
 
+import static com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.REUSE_RESULT_YES_WITHOUT_RECONFIGURATION;
 import static java.lang.Runtime.getRuntime;
 
 import android.os.Handler;
@@ -23,6 +24,7 @@ import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.RendererCapabilities;
+import com.google.android.exoplayer2.decoder.DecoderReuseEvaluation;
 import com.google.android.exoplayer2.drm.ExoMediaCrypto;
 import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.TraceUtil;
@@ -102,7 +104,6 @@ public class LibvpxVideoRenderer extends DecoderVideoRenderer {
    * @param numInputBuffers Number of input buffers.
    * @param numOutputBuffers Number of output buffers.
    */
-  @SuppressWarnings("deprecation")
   public LibvpxVideoRenderer(
       long allowedJoiningTimeMs,
       @Nullable Handler eventHandler,
@@ -126,15 +127,16 @@ public class LibvpxVideoRenderer extends DecoderVideoRenderer {
   @Capabilities
   public final int supportsFormat(Format format) {
     if (!VpxLibrary.isAvailable() || !MimeTypes.VIDEO_VP9.equalsIgnoreCase(format.sampleMimeType)) {
-      return RendererCapabilities.create(FORMAT_UNSUPPORTED_TYPE);
+      return RendererCapabilities.create(C.FORMAT_UNSUPPORTED_TYPE);
     }
     boolean drmIsSupported =
-        format.drmInitData == null
+        format.exoMediaCryptoType == null
             || VpxLibrary.matchesExpectedExoMediaCryptoType(format.exoMediaCryptoType);
     if (!drmIsSupported) {
-      return RendererCapabilities.create(FORMAT_UNSUPPORTED_DRM);
+      return RendererCapabilities.create(C.FORMAT_UNSUPPORTED_DRM);
     }
-    return RendererCapabilities.create(FORMAT_HANDLED, ADAPTIVE_SEAMLESS, TUNNELING_NOT_SUPPORTED);
+    return RendererCapabilities.create(
+        C.FORMAT_HANDLED, ADAPTIVE_SEAMLESS, TUNNELING_NOT_SUPPORTED);
   }
 
   @Override
@@ -167,5 +169,16 @@ public class LibvpxVideoRenderer extends DecoderVideoRenderer {
     if (decoder != null) {
       decoder.setOutputMode(outputMode);
     }
+  }
+
+  @Override
+  protected DecoderReuseEvaluation canReuseDecoder(
+      String decoderName, Format oldFormat, Format newFormat) {
+    return new DecoderReuseEvaluation(
+        decoderName,
+        oldFormat,
+        newFormat,
+        REUSE_RESULT_YES_WITHOUT_RECONFIGURATION,
+        /* discardReasons= */ 0);
   }
 }

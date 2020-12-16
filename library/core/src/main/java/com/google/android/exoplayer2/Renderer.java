@@ -47,6 +47,34 @@ import java.lang.annotation.RetentionPolicy;
 public interface Renderer extends PlayerMessage.Target {
 
   /**
+   * Some renderers can signal when {@link #render(long, long)} should be called.
+   *
+   * <p>That allows the player to sleep until the next wakeup, instead of calling {@link
+   * #render(long, long)} in a tight loop. The aim of this interrupt based scheduling is to save
+   * power.
+   */
+  interface WakeupListener {
+
+    /**
+     * The renderer no longer needs to render until the next wakeup.
+     *
+     * <p>Must be called from the thread ExoPlayer invokes the renderer from.
+     *
+     * @param wakeupDeadlineMs Maximum time in milliseconds until {@link #onWakeup()} will be
+     *     called.
+     */
+    void onSleep(long wakeupDeadlineMs);
+
+    /**
+     * The renderer needs to render some frames. The client should call {@link #render(long, long)}
+     * at its earliest convenience.
+     *
+     * <p>Can be called from any thread.
+     */
+    void onWakeup();
+  }
+
+  /**
    * The type of a message that can be passed to a video renderer via {@link
    * ExoPlayer#createMessage(Target)}. The message payload should be the target {@link Surface}, or
    * null.
@@ -86,7 +114,7 @@ public interface Renderer extends PlayerMessage.Target {
   /**
    * The type of a message that can be passed to a {@link MediaCodec}-based video renderer via
    * {@link ExoPlayer#createMessage(Target)}. The message payload should be one of the integer
-   * scaling modes in {@link VideoScalingMode}.
+   * scaling modes in {@link C.VideoScalingMode}.
    *
    * <p>Note that the scaling mode only applies if the {@link Surface} targeted by the renderer is
    * owned by a {@link android.view.SurfaceView}.
@@ -138,30 +166,41 @@ public interface Renderer extends PlayerMessage.Target {
    */
   int MSG_SET_AUDIO_SESSION_ID = 102;
   /**
+   * A type of a message that can be passed to a {@link Renderer} via {@link
+   * ExoPlayer#createMessage(Target)}, to inform the renderer that it can schedule waking up another
+   * component.
+   *
+   * <p>The message payload must be a {@link WakeupListener} instance.
+   */
+  int MSG_SET_WAKEUP_LISTENER = 103;
+  /**
    * Applications or extensions may define custom {@code MSG_*} constants that can be passed to
    * renderers. These custom constants must be greater than or equal to this value.
    */
   @SuppressWarnings("deprecation")
   int MSG_CUSTOM_BASE = C.MSG_CUSTOM_BASE;
 
-  /**
-   * Video scaling modes for {@link MediaCodec}-based renderers. One of {@link
-   * #VIDEO_SCALING_MODE_SCALE_TO_FIT} or {@link #VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING}.
-   */
+  /** @deprecated Use {@link C.VideoScalingMode}. */
+  // VIDEO_SCALING_MODE_DEFAULT is an intentionally duplicated constant.
+  @SuppressWarnings({"UniqueConstants", "Deprecation"})
   @Documented
   @Retention(RetentionPolicy.SOURCE)
-  @IntDef(value = {VIDEO_SCALING_MODE_SCALE_TO_FIT, VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING})
+  @IntDef(
+      value = {
+        VIDEO_SCALING_MODE_DEFAULT,
+        VIDEO_SCALING_MODE_SCALE_TO_FIT,
+        VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+      })
+  @Deprecated
   @interface VideoScalingMode {}
-  /** See {@link MediaCodec#VIDEO_SCALING_MODE_SCALE_TO_FIT}. */
-  @SuppressWarnings("deprecation")
-  int VIDEO_SCALING_MODE_SCALE_TO_FIT = C.VIDEO_SCALING_MODE_SCALE_TO_FIT;
-  /** See {@link MediaCodec#VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING}. */
-  @SuppressWarnings("deprecation")
+  /** @deprecated Use {@link C#VIDEO_SCALING_MODE_SCALE_TO_FIT}. */
+  @Deprecated int VIDEO_SCALING_MODE_SCALE_TO_FIT = C.VIDEO_SCALING_MODE_SCALE_TO_FIT;
+  /** @deprecated Use {@link C#VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING}. */
+  @Deprecated
   int VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING =
       C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING;
-  /** A default video scaling mode for {@link MediaCodec}-based renderers. */
-  @SuppressWarnings("deprecation")
-  int VIDEO_SCALING_MODE_DEFAULT = C.VIDEO_SCALING_MODE_DEFAULT;
+  /** @deprecated Use {@code C.VIDEO_SCALING_MODE_DEFAULT}. */
+  @Deprecated int VIDEO_SCALING_MODE_DEFAULT = C.VIDEO_SCALING_MODE_DEFAULT;
 
   /**
    * The renderer states. One of {@link #STATE_DISABLED}, {@link #STATE_ENABLED} or {@link
@@ -172,9 +211,9 @@ public interface Renderer extends PlayerMessage.Target {
   @IntDef({STATE_DISABLED, STATE_ENABLED, STATE_STARTED})
   @interface State {}
   /**
-   * The renderer is disabled. A renderer in this state may hold resources that it requires for
-   * rendering (e.g. media decoders), for use if it's subsequently enabled. {@link #reset()} can be
-   * called to force the renderer to release these resources.
+   * The renderer is disabled. A renderer in this state will not proactively acquire resources that
+   * it requires for rendering (e.g., media decoders), but may continue to hold any that it already
+   * has. {@link #reset()} can be called to force the renderer to release such resources.
    */
   int STATE_DISABLED = 0;
   /**
@@ -253,6 +292,7 @@ public interface Renderer extends PlayerMessage.Target {
    * @param joining Whether this renderer is being enabled to join an ongoing playback.
    * @param mayRenderStartOfStream Whether this renderer is allowed to render the start of the
    *     stream even if the state is not {@link #STATE_STARTED} yet.
+   * @param startPositionUs The start position of the stream in renderer time (microseconds).
    * @param offsetUs The offset to be added to timestamps of buffers read from {@code stream} before
    *     they are rendered.
    * @throws ExoPlaybackException If an error occurs.
@@ -264,6 +304,7 @@ public interface Renderer extends PlayerMessage.Target {
       long positionUs,
       boolean joining,
       boolean mayRenderStartOfStream,
+      long startPositionUs,
       long offsetUs)
       throws ExoPlaybackException;
 
@@ -280,17 +321,18 @@ public interface Renderer extends PlayerMessage.Target {
 
   /**
    * Replaces the {@link SampleStream} from which samples will be consumed.
-   * <p>
-   * This method may be called when the renderer is in the following states:
-   * {@link #STATE_ENABLED}, {@link #STATE_STARTED}.
+   *
+   * <p>This method may be called when the renderer is in the following states: {@link
+   * #STATE_ENABLED}, {@link #STATE_STARTED}.
    *
    * @param formats The enabled formats.
    * @param stream The {@link SampleStream} from which the renderer should consume.
+   * @param startPositionUs The start position of the new stream in renderer time (microseconds).
    * @param offsetUs The offset to be added to timestamps of buffers read from {@code stream} before
    *     they are rendered.
    * @throws ExoPlaybackException If an error occurs.
    */
-  void replaceStream(Format[] formats, SampleStream stream, long offsetUs)
+  void replaceStream(Format[] formats, SampleStream stream, long startPositionUs, long offsetUs)
       throws ExoPlaybackException;
 
   /** Returns the {@link SampleStream} being consumed, or null if the renderer is disabled. */
@@ -306,7 +348,7 @@ public interface Renderer extends PlayerMessage.Target {
   boolean hasReadStreamToEnd();
 
   /**
-   * Returns the playback position up to which the renderer has read samples from the current {@link
+   * Returns the renderer time up to which the renderer has read samples from the current {@link
    * SampleStream}, in microseconds, or {@link C#TIME_END_OF_SOURCE} if the renderer has read the
    * current {@link SampleStream} to the end.
    *
@@ -357,16 +399,15 @@ public interface Renderer extends PlayerMessage.Target {
   void resetPosition(long positionUs) throws ExoPlaybackException;
 
   /**
-   * Sets the operating rate of this renderer, where 1 is the default rate, 2 is twice the default
-   * rate, 0.5 is half the default rate and so on. The operating rate is a hint to the renderer of
-   * the speed at which playback will proceed, and may be used for resource planning.
+   * Indicates the player's speed to this renderer, where 1 is the default rate, 2 is twice the
+   * default rate, 0.5 is half the default rate and so on.
    *
    * <p>The default implementation is a no-op.
    *
-   * @param operatingRate The operating rate.
-   * @throws ExoPlaybackException If an error occurs handling the operating rate.
+   * @param playbackSpeed The playback speed.
+   * @throws ExoPlaybackException If an error occurs handling the playback speed.
    */
-  default void setOperatingRate(float operatingRate) throws ExoPlaybackException {}
+  default void setPlaybackSpeed(float playbackSpeed) throws ExoPlaybackException {}
 
   /**
    * Incrementally renders the {@link SampleStream}.
@@ -379,8 +420,8 @@ public interface Renderer extends PlayerMessage.Target {
    * <p>The renderer may also render the very start of the media at the current position (e.g. the
    * first frame of a video stream) while still in the {@link #STATE_ENABLED} state, unless it's the
    * initial start of the media after calling {@link #enable(RendererConfiguration, Format[],
-   * SampleStream, long, boolean, boolean, long)} with {@code mayRenderStartOfStream} set to {@code
-   * false}.
+   * SampleStream, long, boolean, boolean, long, long)} with {@code mayRenderStartOfStream} set to
+   * {@code false}.
    *
    * <p>This method should return quickly, and should not block if the renderer is unable to make
    * useful progress.
@@ -427,13 +468,11 @@ public interface Renderer extends PlayerMessage.Target {
 
   /**
    * Stops the renderer, transitioning it to the {@link #STATE_ENABLED} state.
-   * <p>
-   * This method may be called when the renderer is in the following states:
-   * {@link #STATE_STARTED}.
    *
-   * @throws ExoPlaybackException If an error occurs.
+   * <p>This method may be called when the renderer is in the following states: {@link
+   * #STATE_STARTED}.
    */
-  void stop() throws ExoPlaybackException;
+  void stop();
 
   /**
    * Disable the renderer, transitioning it to the {@link #STATE_DISABLED} state.

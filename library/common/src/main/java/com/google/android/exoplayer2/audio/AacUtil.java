@@ -15,11 +15,14 @@
  */
 package com.google.android.exoplayer2.audio;
 
+import androidx.annotation.IntDef;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.ParserException;
-import com.google.android.exoplayer2.util.Assertions;
 import com.google.android.exoplayer2.util.Log;
 import com.google.android.exoplayer2.util.ParsableBitArray;
+import java.lang.annotation.Documented;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 
 /** Utility methods for handling AAC audio streams. */
 public final class AacUtil {
@@ -132,26 +135,45 @@ public final class AacUtil {
   private static final String CODECS_STRING_PREFIX = "mp4a.40.";
 
   // Advanced Audio Coding Low-Complexity profile.
-  private static final int AUDIO_OBJECT_TYPE_AAC_LC = 2;
+  public static final int AUDIO_OBJECT_TYPE_AAC_LC = 2;
   // Spectral Band Replication.
-  private static final int AUDIO_OBJECT_TYPE_AAC_SBR = 5;
+  public static final int AUDIO_OBJECT_TYPE_AAC_SBR = 5;
   // Error Resilient Bit-Sliced Arithmetic Coding.
-  private static final int AUDIO_OBJECT_TYPE_AAC_ER_BSAC = 22;
+  public static final int AUDIO_OBJECT_TYPE_AAC_ER_BSAC = 22;
   // Enhanced low delay.
-  private static final int AUDIO_OBJECT_TYPE_AAC_ELD = 23;
+  public static final int AUDIO_OBJECT_TYPE_AAC_ELD = 23;
   // Parametric Stereo.
-  private static final int AUDIO_OBJECT_TYPE_AAC_PS = 29;
+  public static final int AUDIO_OBJECT_TYPE_AAC_PS = 29;
   // Escape code for extended audio object types.
   private static final int AUDIO_OBJECT_TYPE_ESCAPE = 31;
   // Extended high efficiency.
-  private static final int AUDIO_OBJECT_TYPE_AAC_XHE = 42;
+  public static final int AUDIO_OBJECT_TYPE_AAC_XHE = 42;
+
+  /**
+   * Valid AAC Audio object types. One of {@link #AUDIO_OBJECT_TYPE_AAC_LC}, {@link
+   * #AUDIO_OBJECT_TYPE_AAC_SBR}, {@link #AUDIO_OBJECT_TYPE_AAC_ER_BSAC}, {@link
+   * #AUDIO_OBJECT_TYPE_AAC_ELD}, {@link #AUDIO_OBJECT_TYPE_AAC_PS} or {@link
+   * #AUDIO_OBJECT_TYPE_AAC_XHE}.
+   */
+  @Documented
+  @Retention(RetentionPolicy.SOURCE)
+  @IntDef({
+    AUDIO_OBJECT_TYPE_AAC_LC,
+    AUDIO_OBJECT_TYPE_AAC_SBR,
+    AUDIO_OBJECT_TYPE_AAC_ER_BSAC,
+    AUDIO_OBJECT_TYPE_AAC_ELD,
+    AUDIO_OBJECT_TYPE_AAC_PS,
+    AUDIO_OBJECT_TYPE_AAC_XHE
+  })
+  public @interface AacAudioObjectType {}
 
   /**
    * Parses an AAC AudioSpecificConfig, as defined in ISO 14496-3 1.6.2.1
    *
    * @param audioSpecificConfig A byte array containing the AudioSpecificConfig to parse.
    * @return The parsed configuration.
-   * @throws ParserException If the AudioSpecificConfig cannot be parsed as it's not supported.
+   * @throws ParserException If the AudioSpecificConfig cannot be parsed because it is invalid or
+   *     unsupported.
    */
   public static Config parseAudioSpecificConfig(byte[] audioSpecificConfig) throws ParserException {
     return parseAudioSpecificConfig(
@@ -166,7 +188,8 @@ public final class AacUtil {
    * @param forceReadToEnd Whether the entire AudioSpecificConfig should be read. Required for
    *     knowing the length of the configuration payload.
    * @return The parsed configuration.
-   * @throws ParserException If the AudioSpecificConfig cannot be parsed as it's not supported.
+   * @throws ParserException If the AudioSpecificConfig cannot be parsed because it is invalid or
+   *     unsupported.
    */
   public static Config parseAudioSpecificConfig(ParsableBitArray bitArray, boolean forceReadToEnd)
       throws ParserException {
@@ -226,7 +249,9 @@ public final class AacUtil {
     }
     // For supported containers, bits_to_decode() is always 0.
     int channelCount = AUDIO_SPECIFIC_CONFIG_CHANNEL_COUNT_TABLE[channelConfiguration];
-    Assertions.checkArgument(channelCount != AUDIO_SPECIFIC_CONFIG_CHANNEL_CONFIGURATION_INVALID);
+    if (channelCount == AUDIO_SPECIFIC_CONFIG_CHANNEL_CONFIGURATION_INVALID) {
+      throw new ParserException();
+    }
     return new Config(sampleRateHz, channelCount, codecs);
   }
 
@@ -275,7 +300,7 @@ public final class AacUtil {
 
   /** Returns the encoding for a given AAC audio object type. */
   @C.Encoding
-  public static int getEncodingForAudioObjectType(int audioObjectType) {
+  public static int getEncodingForAudioObjectType(@AacAudioObjectType int audioObjectType) {
     switch (audioObjectType) {
       case AUDIO_OBJECT_TYPE_AAC_LC:
         return C.ENCODING_AAC_LC;
@@ -287,6 +312,8 @@ public final class AacUtil {
         return C.ENCODING_AAC_XHE;
       case AUDIO_OBJECT_TYPE_AAC_ELD:
         return C.ENCODING_AAC_ELD;
+      case AUDIO_OBJECT_TYPE_AAC_ER_BSAC:
+        return C.ENCODING_AAC_ER_BSAC;
       default:
         return C.ENCODING_INVALID;
     }
@@ -312,15 +339,17 @@ public final class AacUtil {
    *
    * @param bitArray The bit array containing the audio specific configuration.
    * @return The sampling frequency.
+   * @throws ParserException If the audio specific configuration is invalid.
    */
-  private static int getSamplingFrequency(ParsableBitArray bitArray) {
+  private static int getSamplingFrequency(ParsableBitArray bitArray) throws ParserException {
     int samplingFrequency;
     int frequencyIndex = bitArray.readBits(4);
     if (frequencyIndex == AUDIO_SPECIFIC_CONFIG_FREQUENCY_INDEX_ARBITRARY) {
       samplingFrequency = bitArray.readBits(24);
-    } else {
-      Assertions.checkArgument(frequencyIndex < 13);
+    } else if (frequencyIndex < 13) {
       samplingFrequency = AUDIO_SPECIFIC_CONFIG_SAMPLING_RATE_TABLE[frequencyIndex];
+    } else {
+      throw new ParserException();
     }
     return samplingFrequency;
   }

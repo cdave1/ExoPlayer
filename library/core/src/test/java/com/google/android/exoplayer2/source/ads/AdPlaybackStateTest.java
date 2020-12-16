@@ -31,12 +31,13 @@ public final class AdPlaybackStateTest {
 
   private static final long[] TEST_AD_GROUP_TMES_US = new long[] {0, C.msToUs(10_000)};
   private static final Uri TEST_URI = Uri.EMPTY;
+  private static final Object TEST_ADS_ID = new Object();
 
   private AdPlaybackState state;
 
   @Before
   public void setUp() {
-    state = new AdPlaybackState(TEST_AD_GROUP_TMES_US);
+    state = new AdPlaybackState(TEST_ADS_ID, TEST_AD_GROUP_TMES_US);
   }
 
   @Test
@@ -64,7 +65,9 @@ public final class AdPlaybackStateTest {
 
     assertThat(state.adGroups[0].uris[0]).isNull();
     assertThat(state.adGroups[0].states[0]).isEqualTo(AdPlaybackState.AD_STATE_ERROR);
+    assertThat(state.isAdInErrorState(/* adGroupIndex= */ 0, /* adIndexInAdGroup= */ 0)).isTrue();
     assertThat(state.adGroups[0].states[1]).isEqualTo(AdPlaybackState.AD_STATE_UNAVAILABLE);
+    assertThat(state.isAdInErrorState(/* adGroupIndex= */ 0, /* adIndexInAdGroup= */ 1)).isFalse();
   }
 
   @Test
