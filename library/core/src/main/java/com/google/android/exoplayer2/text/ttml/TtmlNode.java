@@ -259,8 +259,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       Bitmap bitmap = BitmapFactory.decodeByteArray(bitmapData, /* offset= */ 0, bitmapData.length);
       TtmlRegion region = Assertions.checkNotNull(regionMap.get(regionImagePair.first));
 
-      cues.add(
-          new Cue.Builder()
+      Cue cue = new Cue.Builder()
               .setBitmap(bitmap)
               .setPosition(region.position)
               .setPositionAnchor(Cue.ANCHOR_TYPE_START)
@@ -269,7 +268,10 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
               .setSize(region.width)
               .setBitmapHeight(region.height)
               .setVerticalType(region.verticalType)
-              .build());
+              .build();
+      cue.startTimeUs = this.startTimeUs;
+      cue.endTimeUs = this.endTimeUs;
+      cues.add(cue);
     }
 
     // Create text based cues.

@@ -267,6 +267,8 @@ public final class SsaDecoder extends SimpleSubtitleDecoder {
             .replace("\\n", "\n")
             .replace("\\h", "\u00A0");
     Cue cue = createCue(text, style, styleOverrides, screenWidth, screenHeight);
+    cue.startTimeUs = startTimeUs;
+    cue.endTimeUs = endTimeUs;
 
     int startTimeIndex = addCuePlacerholderByTime(startTimeUs, cueTimesUs, cues);
     int endTimeIndex = addCuePlacerholderByTime(endTimeUs, cueTimesUs, cues);
