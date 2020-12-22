@@ -85,7 +85,11 @@ import java.util.List;
     Collections.sort(cuesWithUnsetLine, (c1, c2) -> Long.compare(c1.startTimeUs, c2.startTimeUs));
     for (int i = 0; i < cuesWithUnsetLine.size(); i++) {
       Cue cue = cuesWithUnsetLine.get(i).cue;
-      currentCues.add(cue.buildUpon().setLine((float) (-1 - i), Cue.LINE_TYPE_NUMBER).build());
+      Cue newCue = cue.buildUpon().setLine((float) (-1 - i), Cue.LINE_TYPE_NUMBER).build();
+      
+      newCue.startTimeUs = cue.startTimeUs;
+      newCue.endTimeUs = cue.endTimeUs;
+      currentCues.add(newCue);
     }
     return currentCues;
   }
